@@ -101,14 +101,51 @@ async function claudeCevap(musteriAd, mesaj, musteriGecmis, oyunListesi) {
 Müşteri adı: ${musteriAd}
 Müşterinin kiralama geçmişi: ${musteriGecmis}
 
-Mevcut oyun kataloğumuz:
+=== İŞLETME BİLGİLERİ ===
+- Dijital PS4 ve PS5 oyun kiralama hizmeti
+- Minimum kiralama süresi: 5 gün
+- Ödeme: Havale / EFT
+- Teslimat: Dijital hesap paylaşımı ile anında, kargo yok
+
+=== SIKÇA SORULAN SORULAR ===
+S: Nasıl çalışıyor?
+C: PS hesabı konsolunuza eklenir, oyunu indirip oynarsınız. Süre sonunda hesap kaldırılır.
+
+S: Kaç kişi aynı anda oynayabilir?
+C: Primary hesap olarak 1 konsolda sınırsız, secondary olarak aynı anda 1 kişi oynayabilir.
+
+S: PS4 oyununu PS5'te oynayabilir miyim?
+C: Evet, PS4 oyunlarının büyük çoğunluğu PS5'te çalışır.
+
+S: Ödemeyi nasıl yapacağım?
+C: Havale/EFT ile ödeme yapılıyor. Kiralama onaylandıktan sonra hesap bilgileri paylaşılır.
+
+S: Süre bitmeden iade olur mu?
+C: Dijital ürün olduğu için süre bitmeden iade yapılamamaktadır.
+
+S: Hesap güvenli mi?
+C: Hesaplar güvenli şekilde paylaşılır, kişisel bilgilerinize erişim olmaz.
+
+S: PS5'te primary hesabı nasıl etkinleştiririm?
+C: Hesaba giriş yaptıktan sonra: Ayarlar → Kullanıcı ve Hesaplar → Diğer → Çevrimdışı Oynamayı Etkinleştir → Etkinleştir. Böylece o konsolda tüm oyunları internet olmadan da oynayabilirsiniz.
+
+S: PS5'te primary hesabı iade ederken ne yapmalıyım?
+C: Aynı yolu izleyin: Ayarlar → Kullanıcı ve Hesaplar → Diğer → Çevrimdışı Oynamayı Etkinleştir → Devre Dışı Bırak. Sonra hesabı konsoldan silin. Bu adımları atlarsanız bir sonraki müşteriye primary verilemez.
+
+S: Aynı anda birden fazla oyun kiralayabilir miyim?
+C: Evet, birden fazla oyun aynı anda kiralanabilir.
+
+S: İndirim var mı?
+C: Uzun süreli ve sadık müşterilere özel indirim uygulanabilir, sormaktan çekinmeyin.
+
+=== MEVCUT OYUNLAR ===
 ${oyunListesi || 'Oyun listesi yüklenemedi'}
 
-Kısa, samimi ve yardımcı cevaplar ver. Türkçe yaz. Emoji kullanabilirsin.
-Oyun sorarlarsa yukarıdaki listeye göre cevap ver, müsait olanları öner.
-Fiyat sormak, oyun önermek, süre uzatmak, iade bildirmek gibi konularda yardımcı ol.
-Bilmediğin teknik şeyleri "sizi arayacağım" veya "birazdan dönüş yapacağım" diyerek yönet.
-Cevabın 4-5 cümleyi geçmesin.`,
+=== KURALLAR ===
+Kısa ve samimi cevaplar ver. Türkçe yaz. Emoji kullanabilirsin.
+Oyun sorarlarsa listeye göre müsait olanları fiyatlarıyla öner.
+Emin olmadığın şeyleri "birazdan dönüş yapacağım" diyerek yönet.
+Asla uydurma bilgi verme. Cevabın 4-5 cümleyi geçmesin.`,
     messages: history,
   });
 
@@ -162,9 +199,31 @@ client.on('ready', () => {
 // ══════════════════════════════════════════
 // GELEN MESAJ İŞLEME
 // ══════════════════════════════════════════
+// İşletmeci devraldı listesi — {tel: timestamp}
+const insanDevraldi = new Map();
+const INSAN_SURESI = 30 * 60 * 1000; // 30 dakika
+
+// İşletmeci müşteriye cevap yazınca botu o konuşmada sustur
+client.on('message_create', async (msg) => {
+  if (!msg.fromMe || msg.to.includes('@g.us')) return;
+  insanDevraldi.set(msg.to, Date.now());
+  console.log(`👤 İşletmeci devraldı: ${msg.to} (30 dk bot susacak)`);
+});
+
 client.on('message', async (msg) => {
-  // Kendi mesajlarımızı ve grup mesajlarını atla
-  if (msg.fromMe || msg.from.includes('@g.us')) return;
+  // Grup mesajlarını atla
+  if (msg.from.includes('@g.us')) return;
+  // Kendi mesajlarımızı atla
+  if (msg.fromMe) return;
+
+  // İşletmeci bu konuşmayı devraldı mı?
+  const devralmaZamani = insanDevraldi.get(msg.from);
+  if (devralmaZamani && Date.now() - devralmaZamani < INSAN_SURESI) {
+    console.log(`👤 Bot susturuldu (işletmeci aktif): ${msg.from}`);
+    return;
+  } else if (devralmaZamani) {
+    insanDevraldi.delete(msg.from); // Süre doldu, bot tekrar aktif
+  }
 
   const tel = msg.from.replace('@c.us', '').replace(/^90/, '0');
   const metin = msg.body.trim().toLowerCase();
@@ -305,7 +364,21 @@ client.on('message', async (msg) => {
     const cevap = await claudeCevap(musteriAd, msg.body, gecmisOzet, oyunListesi);
     await msg.reply(cevap);
   } catch (e) {
+    console.error('Claude API hatası:', e.message);
     await msg.reply('Şu an cevap vermekte güçlük çekiyorum, birazdan tekrar dener misiniz? 🙏');
+    // İşletmeciye bildirim gönder
+    if (CONFIG.BENIM_NUMARAM) {
+      const benimTel = CONFIG.BENIM_NUMARAM + '@c.us';
+      try {
+        await client.sendMessage(benimTel,
+          `⚠️ *Bot Hatası*\n\n` +
+          `Müşteri: *${musteriAd}*\n` +
+          `Mesaj: "${msg.body}"\n` +
+          `Hata: ${e.message}\n\n` +
+          `Manuel cevap gerekebilir!`
+        );
+      } catch(e2) { console.error('Bildirim gönderilemedi:', e2.message); }
+    }
   }
 });
 
