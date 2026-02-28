@@ -1,8 +1,10 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+const qrcodeWeb = require('qrcode');
 const admin = require('firebase-admin');
 const Anthropic = require('@anthropic-ai/sdk');
 const cron = require('node-cron');
+const http = require('http');
 
 // ══════════════════════════════════════════
 // YAPILANDIRMA
@@ -137,13 +139,19 @@ const client = new Client({
   }
 });
 
-client.on('qr', (qr) => {
-  console.log('\n📱 QR KODU TARA:\n');
+client.on('qr', async (qr) => {
+  console.log('\n📱 QR KODU TARA — Tarayıcıdan aç!\n');
   qrcode.generate(qr, { small: true });
+  try {
+    qrDataUrl = await qrcodeWeb.toDataURL(qr, { width: 300, margin: 2 });
+    console.log('🌐 QR için tarayıcıda aç: Railway servisinin public URL\'ini kullan');
+  } catch(e) { console.error('QR web hatası:', e.message); }
 });
 
 client.on('ready', () => {
   console.log('✅ WhatsApp botu hazır!');
+  botReady = true;
+  qrDataUrl = null;
   zamanlanmisKontroller();
 });
 
@@ -426,6 +434,31 @@ async function gecikmeKontrol() {
 function bekle(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+// ══════════════════════════════════════════
+// WEB SUNUCUSU — QR KOD GÖRÜNTÜLEME
+// ══════════════════════════════════════════
+let qrDataUrl = null;
+let botReady = false;
+
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  if (botReady) {
+    res.end('<html><body style="background:#111;color:#0f0;font-family:sans-serif;text-align:center;padding:50px"><h1>✅ Bot Aktif!</h1><p>WhatsApp bağlantısı kuruldu, bot çalışıyor.</p></body></html>');
+  } else if (qrDataUrl) {
+    res.end(`<html><body style="background:#111;color:white;font-family:sans-serif;text-align:center;padding:30px">
+      <h2>📱 WhatsApp QR Kodu</h2>
+      <p>WhatsApp Business → Bağlı Cihazlar → Cihaz Ekle → Bu kodu tara</p>
+      <img src="${qrDataUrl}" style="width:300px;height:300px;border:10px solid white;border-radius:10px">
+      <p style="color:#aaa;font-size:12px">QR kod 60 saniyede yenilenir, sayfa yenile</p>
+    </body></html>`);
+  } else {
+    res.end('<html><body style="background:#111;color:white;font-family:sans-serif;text-align:center;padding:50px"><h2>⏳ Bot başlatılıyor...</h2><p>Birkaç saniye bekleyin ve sayfayı yenileyin.</p></body></html>');
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`🌐 Web sunucusu: http://localhost:${PORT}`));
 
 // ══════════════════════════════════════════
 // BAŞLAT
