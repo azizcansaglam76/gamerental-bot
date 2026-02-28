@@ -17,8 +17,13 @@ const CONFIG = {
 // ══════════════════════════════════════════
 // FIREBASE BAŞLAT
 // ══════════════════════════════════════════
+// serviceAccountKey.json yerine environment variable'dan oku
+const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
+  ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+  : require('./serviceAccountKey.json'); // lokal test için
+
 admin.initializeApp({
-  credential: admin.credential.cert(require('./serviceAccountKey.json')),
+  credential: admin.credential.cert(serviceAccount),
   projectId: CONFIG.FIREBASE_PROJECT,
 });
 const db = admin.firestore();
