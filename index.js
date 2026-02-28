@@ -202,10 +202,25 @@ client.on('ready', () => {
 // İşletmeci devraldı listesi — {tel: timestamp}
 const insanDevraldi = new Map();
 const INSAN_SURESI = 30 * 60 * 1000; // 30 dakika
+// Botun kendi gönderdiği mesajları takip et (yanlış susturma önlemi)
+const botMesajZamanlari = new Set();
+
+async function botGonder(tel, mesaj) {
+  botMesajZamanlari.add(Date.now());
+  return client.sendMessage(tel, mesaj);
+}
 
 // İşletmeci müşteriye cevap yazınca botu o konuşmada sustur
 client.on('message_create', async (msg) => {
   if (!msg.fromMe || msg.to.includes('@g.us')) return;
+  // Son 2 saniye içinde bot mesaj gönderdiyse bu botun mesajıdır, atla
+  const simdi = Date.now();
+  const botMesajiMi = [...botMesajZamanlari].some(t => simdi - t < 2000);
+  if (botMesajiMi) {
+    // Eski zamanları temizle
+    botMesajZamanlari.forEach(t => { if(simdi - t > 5000) botMesajZamanlari.delete(t); });
+    return;
+  }
   insanDevraldi.set(msg.to, Date.now());
   console.log(`👤 İşletmeci devraldı: ${msg.to} (30 dk bot susacak)`);
 });
