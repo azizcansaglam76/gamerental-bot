@@ -18,9 +18,18 @@ const CONFIG = {
 // FIREBASE BAŞLAT
 // ══════════════════════════════════════════
 // serviceAccountKey.json yerine environment variable'dan oku
-const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
-  ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-  : require('./serviceAccountKey.json'); // lokal test için
+let serviceAccount;
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } else {
+    serviceAccount = require('./serviceAccountKey.json');
+  }
+} catch(e) {
+  console.error('Firebase parse hatasi:', e.message);
+  console.error('Uzunluk:', process.env.FIREBASE_SERVICE_ACCOUNT?.length);
+  process.exit(1);
+}
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
