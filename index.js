@@ -89,22 +89,26 @@ const anthropic = new Anthropic({ apiKey: CONFIG.ANTHROPIC_API_KEY });
 // Müşteri bazlı konuşma geçmişi
 const konusmalar = new Map();
 
-async function claudeCevap(musteriAd, mesaj, musteriGecmis) {
+async function claudeCevap(musteriAd, mesaj, musteriGecmis, oyunListesi) {
   const history = konusmalar.get(musteriAd) || [];
   
   history.push({ role: 'user', content: mesaj });
 
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 300,
+    max_tokens: 400,
     system: `Sen GameRental adlı PlayStation oyun kiralama işletmesinin WhatsApp asistanısın.
 Müşteri adı: ${musteriAd}
 Müşterinin kiralama geçmişi: ${musteriGecmis}
 
+Mevcut oyun kataloğumuz:
+${oyunListesi || 'Oyun listesi yüklenemedi'}
+
 Kısa, samimi ve yardımcı cevaplar ver. Türkçe yaz. Emoji kullanabilirsin.
+Oyun sorarlarsa yukarıdaki listeye göre cevap ver, müsait olanları öner.
 Fiyat sormak, oyun önermek, süre uzatmak, iade bildirmek gibi konularda yardımcı ol.
 Bilmediğin teknik şeyleri "sizi arayacağım" veya "birazdan dönüş yapacağım" diyerek yönet.
-Cevabın 3-4 cümleyi geçmesin.`,
+Cevabın 4-5 cümleyi geçmesin.`,
     messages: history,
   });
 
@@ -289,8 +293,16 @@ client.on('message', async (msg) => {
     ? `${veri.kiralamalar.filter(k => k.musteriId === musteri.id).length} kiralama, ${aktifKira ? 'aktif kiralama var (bitiş: ' + aktifKira.bit + ')' : 'aktif kiralama yok'}`
     : 'Kayıtlı müşteri değil';
 
+  // Oyun listesi — müsait ve kiradaki oyunlar
+  const oyunListesi = veri.oyunlar.map(o => {
+    const kopya = (o.kopyalar || []).length || 1;
+    const kirada = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif').length;
+    const musait = kopya - kirada;
+    return `${o.ad} (${o.platform||'PS'}, günlük ₺${o.gunluk}, ${musait > 0 ? musait + ' adet müsait' : 'kirada'})`;
+  }).join('\n');
+
   try {
-    const cevap = await claudeCevap(musteriAd, msg.body, gecmisOzet);
+    const cevap = await claudeCevap(musteriAd, msg.body, gecmisOzet, oyunListesi);
     await msg.reply(cevap);
   } catch (e) {
     await msg.reply('Şu an cevap vermekte güçlük çekiyorum, birazdan tekrar dener misiniz? 🙏');
