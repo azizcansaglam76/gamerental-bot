@@ -23,7 +23,16 @@ const CONFIG = {
 // ══════════════════════════════════════════
 let serviceAccount;
 try {
-  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_B64) {
+    const decoded = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_B64, 'base64').toString('utf8');
+    serviceAccount = JSON.parse(decoded);
+    console.log('Firebase: B64 ile yüklendi');
+  } else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    console.log('Firebase: JSON ile yüklendi');
+  } else {
+    throw new Error('FIREBASE_SERVICE_ACCOUNT_B64 veya FIREBASE_SERVICE_ACCOUNT tanımlı değil');
+  }
 } catch (e) {
   console.error('Firebase service account parse hatası:', e.message);
   process.exit(1);
