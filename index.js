@@ -119,6 +119,9 @@ async function claudeCevap(musteriAd, mesaj, musteriGecmis, oyunListesi) {
   const history = konusmalar.get(musteriAd) || [];
   history.push({ role: 'user', content: mesaj });
 
+  // Son 6 mesajı tut (3 tur)
+  const kisaltilmisHistory = history.slice(-6);
+  console.log('Claude API çağrısı:', musteriAd, 'mesaj sayısı:', kisaltilmisHistory.length);
   const response = await axios.post('https://api.anthropic.com/v1/messages', {
     model: 'claude-sonnet-4-20250514',
     max_tokens: 400,
@@ -139,7 +142,7 @@ ${oyunListesi || 'Oyun listesi yüklenemedi'}
 Kısa ve samimi cevaplar ver. Türkçe yaz. Emoji kullanabilirsin.
 Emin olmadığın şeyleri "birazdan dönüş yapacağım" diyerek yönet.
 Asla uydurma bilgi verme. Cevabın 4-5 cümleyi geçmesin.`,
-    messages: history,
+    messages: kisaltilmisHistory,
   }, {
     headers: {
       'x-api-key': CONFIG.ANTHROPIC_API_KEY,
@@ -443,7 +446,9 @@ app.post('/webhook', async (req, res) => {
         const kiraSayisi = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif').length;
         const toplamSlot = (o.kopyalar?.length || 0) + 1;
         const musait = kiraSayisi < toplamSlot;
-        return `${musait ? '✅' : '❌'} *${o.ad}* (${o.platform}) — Günlük: ${formatPara(o.gunluk)}`;
+        const priGunluk = o.gunlukPri || o.gunluk || 0;
+        const secGunluk = o.gunlukSec || Math.round((o.gunluk || 0) * 0.85);
+        return `${musait ? '✅' : '❌'} *${o.ad}* (${o.platform})\n   🔵 Primary: ${formatPara(priGunluk)}/gün\n   🟣 Secondary: ${formatPara(secGunluk)}/gün`;
       }).join('\n');
       await mesajGonder(tel, `🎮 *Oyun Listesi*\n\n${musaitOyunlar}`);
       return;
@@ -457,7 +462,9 @@ app.post('/webhook', async (req, res) => {
     const oyunListesi = veri.oyunlar.filter(o => !o.deaktif).map(o => {
       const kirada = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif').length;
       const musait = ((o.kopyalar?.length || 0) + 1) - kirada;
-      return `${o.ad} (${o.platform}, günlük ₺${o.gunluk}, ${musait > 0 ? 'müsait' : 'kirada'})`;
+      const priGunluk = o.gunlukPri || o.gunluk || 0;
+      const secGunluk = o.gunlukSec || Math.round((o.gunluk || 0) * 0.85);
+      return `${o.ad} (${o.platform}, Primary: ₺${priGunluk}/gün, Secondary: ₺${secGunluk}/gün, ${musait > 0 ? 'müsait' : 'kirada'})`;
     }).join('\n');
 
     try {
