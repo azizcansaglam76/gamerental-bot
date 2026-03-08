@@ -1,0 +1,17 @@
+{
+  "name": "gamerental-bot",
+  "version": "2.0.0",
+  "description": "GameRental WhatsApp Bot - Waha webhook",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "firebase-admin": "^12.0.0",
+    "axios": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
