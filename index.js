@@ -569,7 +569,7 @@ async function gecikmeKontrol() {
 
 setInterval(async () => {
   const saat = new Date().getHours();
-  if (saat === 9) await yarinBitenKontrol();
+  if (saat === 15) await yarinBitenKontrol();
   await gecikmeKontrol();
 }, 60 * 60 * 1000);
 
