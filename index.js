@@ -392,7 +392,7 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ANA MENÜ KOMUTLARI
-    if (metin === 'merhaba' || metin === 'selam' || metin === 'menu' || metin === 'menü' || metin === 'hi' || metin === 'başla') {
+    if (metin === 'merhaba' || metin === 'selam' || metin === 'selamlar' || metin === 'menu' || metin === 'menü' || metin === 'hi' || metin === 'başla') {
       await mesajGonder(tel,
         `👋 Merhaba *${musteriAd}*!\n\nGameRental'a hoş geldiniz 🎮\n\n` +
         `*1* - 📋 Kiralama durumum\n*2* - 🔄 Süre uzat\n*3* - 📦 İade bildirimi\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n\nVeya sorunuzu yazın!`
