@@ -433,7 +433,7 @@ app.post('/webhook', async (req, res) => {
 
     // ── GENEL İPTAL — herhangi bir state'deyken "iptal" yazarsa menüye dön ──
     const bekleyenKontrol = bekleyenOnaylar.get(tel);
-    if (bekleyenKontrol && (metin === 'iptal' || metin === 'vazgeç' || metin === 'vazgec' || metin === 'geri')) {
+    if (bekleyenKontrol && (metin === 'iptal' || metin === 'vazgeç' || metin === 'İptal' || metin === 'vazgec' || metin === 'geri')) {
       bekleyenOnaylar.delete(tel);
       await mesajGonder(tel,
         `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
