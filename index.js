@@ -627,7 +627,15 @@ async function gecikmeKontrol() {
   }
 }
 
+// Restart sonrası hemen çalışmasın — ilk kontrol 1 saat sonra
+// Gecikme kontrolü: Firebase'e tarih yazar, aynı gün tekrar atmaz
+let _ilkBaslangic = Date.now();
 setInterval(async () => {
+  // Restart'tan sonra 60 dakika geçmediyse hiç çalışma
+  if (Date.now() - _ilkBaslangic < 60 * 60 * 1000) {
+    console.log('⏳ Zamanlayıcı bekleme modunda (restart sonrası)');
+    return;
+  }
   const saat = new Date().getHours();
   if (saat === 15) await yarinBitenKontrol();
   await gecikmeKontrol();
