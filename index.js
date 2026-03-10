@@ -58,7 +58,33 @@ function gunlukFiyat(oyun, tip) {
     : (oyun.gunlukSec || Math.round((oyun.gunluk||0) * 0.85));
 }
 
-// ── MESAJ GÖNDER ──
+// ── TİER SİSTEMİ ──
+function getMusteriTierBot(musteriId, veri) {
+  const d3ay = new Date();
+  d3ay.setMonth(d3ay.getMonth() - 3);
+  const d3ayStr = d3ay.toISOString().slice(0, 10);
+  const kiralar = veri.kiralamalar.filter(k => k.musteriId === musteriId && k.bas >= d3ayStr);
+  const toplam = kiralar.reduce((s, k) => s + k.net, 0);
+  if (toplam >= 3000) return { seviye: 'platin', emoji: '💎', label: 'Platin', indirim: 15, toplam, sonraki: null, kalanTL: 0 };
+  if (toplam >= 1500) return { seviye: 'altin',  emoji: '🥇', label: 'Altın',  indirim: 10, toplam, sonraki: 'Platin 💎', kalanTL: 3000 - toplam };
+  if (toplam >= 750)  return { seviye: 'gumus',  emoji: '🥈', label: 'Gümüş',  indirim: 5,  toplam, sonraki: 'Altın 🥇',  kalanTL: 1500 - toplam };
+  return                     { seviye: 'bronz',  emoji: '🥉', label: 'Bronz',  indirim: 0,  toplam, sonraki: 'Gümüş 🥈',  kalanTL: 750 - toplam };
+}
+
+function tierMesajiOlustur(tier, musteriAd) {
+  const adSoyad = musteriAd || 'Müşterimiz';
+  let mesaj = `🎮 *${adSoyad}*\n\n`;
+  mesaj += `${tier.emoji} *${tier.label} Üye*\n`;
+  mesaj += `📊 Son 3 ay harcama: *${fmt(tier.toplam)}*\n`;
+  if (tier.indirim > 0) mesaj += `✨ İndirim hakkın: *%${tier.indirim}*\n`;
+  if (tier.sonraki) {
+    mesaj += `\n📈 *${tier.sonraki}* için *${fmt(tier.kalanTL)}* daha harca!\n`;
+  } else {
+    mesaj += `\n🏆 En üst seviyedesin, tebrikler!\n`;
+  }
+  return mesaj;
+}
+
 async function mesajGonder(tel, metin) {
   try {
     const chatId = tel.includes('@') ? tel : tel + '@c.us';
@@ -238,6 +264,8 @@ app.post('/webhook', async (req, res) => {
           const yeniId = (veri2.nextId?.k || 400) + 1;
           const bas = bugun();
           const bit = tarihEkle(bas, hedefBekleyen.gun);
+          // Tier kontrolü — ÖNCE (kiralama eklenmeden)
+          const tierOncesi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
           veri2.kiralamalar.push({
             id: yeniId, oyunId: hedefBekleyen.oyunId, musteriId: hedefBekleyen.musteriId,
             tip: hedefBekleyen.kiraTip, bas, bit,
@@ -248,9 +276,18 @@ app.post('/webhook', async (req, res) => {
           veri2.nextId.k = yeniId;
           await setVeri(veri2);
           bekleyenOnaylar.delete(hedefKey);
-          await mesajGonder(hedefKey,
-            `✅ *Ödemeniz onaylandı!*\n\n🎮 *${hedefBekleyen.oyunAd}*\n📅 ${bas} → ${bit}\n💰 ${fmt(hedefBekleyen.ucret)}\n\nHesap bilgileri için işletmecimiz kısa sürede sizinle iletişime geçecek 🙏`
-          );
+          // Tier kontrolü — SONRA
+          const tierSonrasi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
+          const tierAtladi = tierOncesi.seviye !== tierSonrasi.seviye;
+          let onayMesaj = `✅ *Ödemeniz onaylandı!*\n\n🎮 *${hedefBekleyen.oyunAd}*\n📅 ${bas} → ${bit}\n💰 ${fmt(hedefBekleyen.ucret)}\n\nHesap bilgileri için işletmecimiz kısa sürede sizinle iletişime geçecek 🙏`;
+          if (tierAtladi) {
+            onayMesaj += `\n\n🎉 *Tebrikler!* ${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} *${tierSonrasi.label}* seviyesine yükseldin!`;
+            if (tierSonrasi.indirim > 0) onayMesaj += `\n✨ Artık *%${tierSonrasi.indirim} indirim* hakkın var!`;
+          }
+          await mesajGonder(hedefKey, onayMesaj);
+          if (tierAtladi) {
+            await banaGonder(`🏅 *Tier Değişimi*\n👤 ${hedefBekleyen.musteriAd}\n${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} ${tierSonrasi.label}`);
+          }
           await banaGonder(`✅ Kiralama eklendi!\n🎮 ${hedefBekleyen.oyunAd}\n👤 ${hedefBekleyen.musteriAd}\n📅 ${bas} → ${bit}\n\n⚠️ Hesabı paylaşmayı unutma!`);
           return;
         }
@@ -259,12 +296,21 @@ app.post('/webhook', async (req, res) => {
         if (hedefBekleyen.tip === 'uzatma_isletmeci_bekle') {
           const k = veri2.kiralamalar.find(x => x.id === hedefBekleyen.kiraId);
           if (k) {
+            const tierOncesi = getMusteriTierBot(k.musteriId, veri2);
             k.bit = tarihEkle(k.bit, hedefBekleyen.gun);
             k.ucret = (k.ucret||0) + hedefBekleyen.ucret;
             k.net = (k.net||0) + hedefBekleyen.ucret;
             await setVeri(veri2);
             bekleyenOnaylar.delete(hedefKey);
-            await mesajGonder(hedefKey, `✅ Uzatma onaylandı! ${hedefBekleyen.gun} gün eklendi.\nYeni bitiş: *${k.bit}* 🎮`);
+            const tierSonrasi = getMusteriTierBot(k.musteriId, veri2);
+            const tierAtladi = tierOncesi.seviye !== tierSonrasi.seviye;
+            let uzatmaMesaj = `✅ Uzatma onaylandı! ${hedefBekleyen.gun} gün eklendi.\nYeni bitiş: *${k.bit}* 🎮`;
+            if (tierAtladi) {
+              uzatmaMesaj += `\n\n🎉 *Tebrikler!* ${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} *${tierSonrasi.label}* seviyesine yükseldin!`;
+              if (tierSonrasi.indirim > 0) uzatmaMesaj += `\n✨ Artık *%${tierSonrasi.indirim} indirim* hakkın var!`;
+              await banaGonder(`🏅 *Tier Değişimi*\n👤 Müşteri #${k.musteriId}\n${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} ${tierSonrasi.label}`);
+            }
+            await mesajGonder(hedefKey, uzatmaMesaj);
             await banaGonder(`✅ Uzatma yapıldı: ${hedefTel}`);
           }
           return;
@@ -474,7 +520,7 @@ app.post('/webhook', async (req, res) => {
     if (['merhaba','selam','menu','menü','hi','başla','baslat','başlat','hey'].includes(metin)) {
       await mesajGonder(tel,
         `👋 Merhaba *${musteriAd}*!\n\nGameRental'a hoş geldiniz 🎮\n\n` +
-        `*1* - 📋 Kiralama durumum\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n\nVeya sorunuzu yazın!`
+        `*1* - 📋 Kiralama durumum\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n\nVeya sorunuzu yazın!`
       );
       return;
     }
@@ -530,8 +576,19 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+    // 6 — Tier / Üyelik seviyesi
+    if (metin === '6' || metin.includes('tier') || metin.includes('seviyem') || metin.includes('üyeliğim') || metin.includes('uyelik') || metin.includes('seviye') || metin.includes('kaç puan') || metin.includes('indirimim') || metin.includes('puanım')) {
+      if (!musteri) {
+        await mesajGonder(tel, `Üyelik bilgisi için önce kayıtlı olmanız gerekiyor.\nİşletmecimize ulaşın 🎮`);
+        return;
+      }
+      const tier = getMusteriTierBot(musteri.id, veri);
+      await mesajGonder(tel, tierMesajiOlustur(tier, musteriAd));
+      return;
+    }
+
     // 5 — Yeni kiralama
-    if (metin === '5' || metin.includes('yeni kiralama') || metin.includes('kiralamak istiyorum') || metin.includes('kiralayabilir miyim') || metin.includes('kiralamak istiyorum')) {
+    if (metin === '5' || metin.includes('yeni kiralama') || metin.includes('kiralamak istiyorum') || metin.includes('kiralayabilir miyim')) {
       if (!musteri) {
         await mesajGonder(tel, `Kiralama için önce kayıtlı olmanız gerekiyor.\nİşletmecimize ulaşın 🎮`);
         await banaGonder(`🛒 *Kayıtsız Kiralama Talebi*\nWhatsApp: ${tel}\nMesaj: "${metinOrijinal}"`);
