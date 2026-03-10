@@ -238,15 +238,25 @@ app.post('/webhook', async (req, res) => {
     // ── KENDİ MESAJLARIM (fromMe) ──
     if (msg.fromMe) {
       if (!benimLid) { benimLid = msg.from; console.log(`📱 Benim LID: ${benimLid}`); }
-      // Müşteriye yazdıysam → botu sustur
-      if (msg.to) {
-        insanDevraldi.set(msg.to, Date.now());
-        console.log(`👤 İşletmeci yazdı → bot susturuldu: ${msg.to}`);
+      const metinFM = (msg.body || '').trim();
+      // # ile başlayan işletmeci komutlarını işle
+      if (metinFM.startsWith('#')) {
+        // komut işleme için aşağı devam et — tel olarak kendi numaramı set et
+        // msg.from yerine msg.to (kime yazdıysak) değil, BENIM_NUMARAM kullan
+      } else {
+        // Normal mesaj — müşteriye yazdıysam botu sustur
+        if (msg.to) {
+          insanDevraldi.set(msg.to, Date.now());
+          console.log(`👤 İşletmeci yazdı → bot susturuldu: ${msg.to}`);
+        }
+        return;
       }
-      return;
     }
 
-    const tel = msg.from;
+    // fromMe + # komutu ise tel olarak kendi numaramı kullan
+    const tel = (msg.fromMe && (msg.body||'').trim().startsWith('#'))
+      ? (CONFIG.BENIM_NUMARAM + '@c.us')
+      : msg.from;
     if (!tel) return;
     const metin = (msg.body || '').trim().toLowerCase();
     const metinOrijinal = (msg.body || '').trim();
@@ -433,7 +443,7 @@ app.post('/webhook', async (req, res) => {
 
     // ── GENEL İPTAL — herhangi bir state'deyken "iptal" yazarsa menüye dön ──
     const bekleyenKontrol = bekleyenOnaylar.get(tel);
-    if (bekleyenKontrol && (metin === 'iptal' || metin === 'vazgeç' || metin === 'İptal' || metin === 'vazgec' || metin === 'geri')) {
+    if (bekleyenKontrol && (metin === 'iptal' || metin === 'vazgeç' || metin === 'vazgec' || metin === 'geri')) {
       bekleyenOnaylar.delete(tel);
       await mesajGonder(tel,
         `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
@@ -510,8 +520,14 @@ app.post('/webhook', async (req, res) => {
 
         const pri = gunlukFiyat(secilen, 'primary');
         const sec = gunlukFiyat(secilen, 'secondary');
-        await mesajGonder(tel, `🎮 *${secilen.ad}* seçildi!\n\n🔵 Primary: ${fmt(pri)}/gün\n🟣 Secondary: ${fmt(sec)}/gün\n\nHangi tipi tercih edersiniz?\n*1* - 🔵 Primary\n*2* - 🟣 Secondary`);
-        bekleyenOnaylar.set(tel, { tip: 'kiralama_tip_bekle', musteriId: musteri.id, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad });
+        const aktif2 = veri.kiralamalar.filter(k => k.oyunId === secilen.id && k.durum === 'aktif');
+        const priDolu = aktif2.filter(k=>k.tip==='primary').length >= (secilen.ciftPrimary?2:1);
+        const secDolu = aktif2.filter(k=>k.tip==='secondary').length >= 1;
+        let tipSecim = `Hangi tipi tercih edersiniz?\n`;
+        if (!priDolu) tipSecim += `*1* - 🔵 Primary: ${fmt(pri)}/gün\n`;
+        if (!secDolu) tipSecim += `*2* - 🟣 Secondary: ${fmt(sec)}/gün\n`;
+        await mesajGonder(tel, `🎮 *${secilen.ad}* seçildi!\n\n${tipSecim}`);
+        bekleyenOnaylar.set(tel, { tip: 'kiralama_tip_bekle', musteriId: musteri.id, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad, priDolu, secDolu });
         return;
       }
 
@@ -555,6 +571,13 @@ app.post('/webhook', async (req, res) => {
         if (metin.includes('primary') || metin === '1') kiraTip = 'primary';
         else if (metin.includes('secondary') || metin === '2') kiraTip = 'secondary';
         if (!kiraTip) { await mesajGonder(tel, `*1* - 🔵 Primary\n*2* - 🟣 Secondary`); return; }
+        // Dolu mu kontrol et
+        if (kiraTip === 'primary' && bekleyen.priDolu) {
+          await mesajGonder(tel, `🔵 Primary dolu! Lütfen 🟣 Secondary seçin (*2*) veya sıraya girin.`); return;
+        }
+        if (kiraTip === 'secondary' && bekleyen.secDolu) {
+          await mesajGonder(tel, `🟣 Secondary dolu! Lütfen 🔵 Primary seçin (*1*) veya sıraya girin.`); return;
+        }
         const oyun = veri.oyunlar.find(o => o.id === bekleyen.oyunId);
         const gf = gunlukFiyat(oyun, kiraTip);
         await mesajGonder(tel, `*${kiraTip === 'primary' ? '🔵 Primary' : '🟣 Secondary'}* seçildi.\n💰 Günlük: ${fmt(gf)}\n\nKaç gün kiralamak istiyorsunuz? (Min. 5 gün)`);
@@ -754,20 +777,27 @@ app.post('/webhook', async (req, res) => {
         return;
       }
       const tumOyunlar = veri.oyunlar.filter(o => !o.deaktif);
-      const musaitOyunlar = tumOyunlar.filter(o => {
-        const kirada = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif').length;
-        return kirada < ((o.kopyalar?.length||0) + 1);
-      });
-      const kiradaOyunlar = tumOyunlar.filter(o => {
-        const kirada = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif').length;
-        return kirada >= ((o.kopyalar?.length||0) + 1);
-      });
+
+      function slotDurumu(o) {
+        const aktif = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif');
+        const priKirada = aktif.filter(k => k.tip === 'primary').length;
+        const secKirada = aktif.filter(k => k.tip === 'secondary').length;
+        const maxPri = (o.ciftPrimary ? 2 : 1) + (o.kopyalar||[]).filter(k=>!k.satildi).reduce((s,k)=>s+(k.ciftPrimary?2:1),0);
+        const maxSec = 1 + (o.kopyalar||[]).filter(k=>!k.satildi).length;
+        return { priMusait: priKirada < maxPri, secMusait: secKirada < maxSec };
+      }
+
+      const musaitOyunlar = tumOyunlar.filter(o => { const s=slotDurumu(o); return s.priMusait||s.secMusait; });
+      const kiradaOyunlar = tumOyunlar.filter(o => { const s=slotDurumu(o); return !s.priMusait&&!s.secMusait; });
 
       let liste = '';
       musaitOyunlar.forEach((o, i) => {
         const pri = gunlukFiyat(o, 'primary');
         const sec = gunlukFiyat(o, 'secondary');
-        liste += `*${i+1}* - ✅ ${o.ad} (${o.platform}) | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün\n`;
+        const s = slotDurumu(o);
+        const priLabel = s.priMusait ? `🔵${fmt(pri)}/gün` : `🔵dolu`;
+        const secLabel = s.secMusait ? `🟣${fmt(sec)}/gün` : `🟣dolu`;
+        liste += `*${i+1}* - ✅ ${o.ad} (${o.platform}) | ${priLabel}  ${secLabel}\n`;
       });
       if (kiradaOyunlar.length > 0) {
         liste += `\n⏳ *Şu an kirada (sıraya girebilirsin):*\n`;
