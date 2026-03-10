@@ -85,7 +85,62 @@ function tierMesajiOlustur(tier, musteriAd) {
   return mesaj;
 }
 
-async function mesajGonder(tel, metin) {
+// ── SSS FONKSİYONU ──
+function sssKontrol(metin, musteriAd) {
+  const ad = musteriAd || 'Müşterimiz';
+
+  // Çalışma saatleri
+  if (metin.includes('saat') || metin.includes('çalışma') || metin.includes('kaçta') ||
+      metin.includes('kaça kadar') || metin.includes('açık') || metin.includes('müsait')) {
+    return `🕐 *Çalışma Saatleri*\n\nMerhaba ${ad}! 😊\n\nBiz 7/24 hizmetinizdeyiz! Gece gündüz her saatte mesaj atabilirsiniz, bot size yardımcı olacaktır.\n\nİşletmecimize ulaşmak istiyorsanız da mesajınızı bırakın, en kısa sürede dönüş yapılır 🙏`;
+  }
+
+  // Nasıl kiralıyorum
+  if (metin.includes('nasıl kirala') || metin.includes('kiralama süreci') || metin.includes('nasıl çalış') ||
+      metin.includes('ne yapacağım') || metin.includes('ne yapmalı') || metin.includes('ilk kez')) {
+    return `🎮 *Kiralama Süreci*\n\nMerhaba ${ad}! Çok basit:\n\n*1️⃣* Menüden *5* yazarak oyun listesini gör\n*2️⃣* Beğendiğin oyunu ve kaç gün istediğini söyle\n*3️⃣* IBAN bilgisi sana gönderilir, ödemeyi yap\n*4️⃣* Dekontu buraya gönder\n*5️⃣* Hesabına erişim bilgileri iletilir ✅\n\nHerhangi bir adımda takılırsan yardımcı oluruz 😊`;
+  }
+
+  // Ödeme yöntemleri
+  if (metin.includes('ödeme') || metin.includes('iban') || metin.includes('havale') ||
+      metin.includes('eft') || metin.includes('para') || metin.includes('nasıl öde')) {
+    return `💳 *Ödeme Yöntemleri*\n\nŞu an ödeme *banka havalesi / EFT* ile yapılmaktadır.\n\nIBAN bilgisi için *5* yazarak kiralama başlatın, otomatik olarak gönderilecektir.\n\nÖdeme sonrası dekontu bu sohbete iletin, hemen işleme alınır ✅`;
+  }
+
+  // İade
+  if ((metin.includes('iade') && !metin.includes('nasıl')) || metin.includes('teslim') ||
+      metin.includes('geri ver') || metin.includes('bitir')) {
+    return `📦 *İade Süreci*\n\nMerhaba ${ad}!\n\nİade için menüden *3* yazmanız yeterli 😊\n\nOyunu bitirdiğinizde bildirim gönderirsiniz, hesap erişimi tarafımızdan sonlandırılır.\n\n⚠️ Hesabı kendiniz çıkmayın, iade bildirimi yapmadan çıkış yapmak sorun oluşturabilir.`;
+  }
+
+  // Gecikme / geç iade
+  if (metin.includes('gecik') || metin.includes('geç kald') || metin.includes('uzatsam') ||
+      metin.includes('süre doldu') || metin.includes('sürem doldu') || metin.includes('süresi geçt')) {
+    return `⏰ *Gecikme Politikası*\n\nMerhaba ${ad}!\n\nİlk gecikmede ek ücret uygulanmaz, anlayışla karşılarız 😊\n\nAncak tekrarlayan gecikmelerde müşteri güven skorunuza göre günlük ek ücret uygulanabilir (₺3 → ₺5 → ₺7 şeklinde artan).\n\nSkorunuz düşerse kara listeye alınabilir ve ileriki kiralamalarda ön ödeme şartı getirilebilir.\n\nEn iyisi uzatma gerekirse önceden *2* yazarak bilgi vermek 🙏`;
+  }
+
+  // Kara liste
+  if (metin.includes('kara liste') || metin.includes('karalist') || metin.includes('yasaklı') ||
+      metin.includes('engellenm')) {
+    return `🚫 *Kara Liste*\n\nKara liste; gecikmeli iade, ödeme sorunları veya hesap ihlali gibi durumlarda uygulanır.\n\nKara listede olan müşterilerimiz yeni kiralama yapamaz.\n\nHerhangi bir sorun yaşadıysanız doğrudan işletmeci ile iletişime geçin, çözüme kavuşturalım 🙏`;
+  }
+
+  // Fiyat soru
+  if (metin.includes('fiyat') || metin.includes('kaç para') || metin.includes('ne kadar') ||
+      metin.includes('ücret') || metin.includes('kaça')) {
+    return `💰 *Fiyatlar*\n\nMerhaba ${ad}!\n\nFiyatlar oyuna ve kiralama tipine göre değişiyor:\n\n🔵 *Primary* — oyunu ana hesaptan oynarsın, tam deneyim\n🟣 *Secondary* — daha uygun fiyatlı seçenek\n\nGüncel fiyatları görmek için *4* yazarak oyun listesine bakabilirsin 🎮`;
+  }
+
+  // Primary / Secondary ne demek
+  if (metin.includes('primary ne') || metin.includes('secondary ne') || metin.includes('primary mı') ||
+      metin.includes('secondary mı') || metin.includes('fark ne') || metin.includes('fark nedir')) {
+    return `🎮 *Primary & Secondary Farkı*\n\n🔵 *Primary (Ana Hesap)*\nOyunu hesabın ana kullanıcısı olarak oynarsın. Tam erişim, çevrimiçi özellikler dahil. Biraz daha pahalı.\n\n🟣 *Secondary (İkinci Kullanıcı)*\nOyunu kendi PS hesabında oynarsın, daha uygun fiyatlı. Çevrimiçi özellikler için PS Plus gerekmeyebilir.\n\nHer ikisi de sorunsuz çalışır, bütçene göre seçebilirsin 😊`;
+  }
+
+  return null; // SSS eşleşmedi, Claude'a git
+}
+
+
   try {
     const chatId = tel.includes('@') ? tel : tel + '@c.us';
     await axios.post(`${CONFIG.WAHA_URL}/api/sendText`,
@@ -382,7 +437,7 @@ app.post('/webhook', async (req, res) => {
       bekleyenOnaylar.delete(tel);
       await mesajGonder(tel,
         `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
-        `*1* - 📋 Kiralama durumum\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem`
+        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem`
       );
       return;
     }
@@ -398,7 +453,7 @@ app.post('/webhook', async (req, res) => {
           bulunan.whatsappLid = tel;
           await setVeri(veri);
           await mesajGonder(tel,
-            `✅ Merhaba *${(bulunan.ad||bulunan.soyad||'').trim()}*!\n\n*1* - 📋 Kiralama durumum\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama`
+            `✅ Merhaba *${(bulunan.ad||bulunan.soyad||'').trim()}*!\n\n*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama`
           );
         } else {
           await mesajGonder(tel, `Sistemde kayıtlı bulunamadınız. Kayıt için işletmecimize ulaşın 🎮`);
@@ -531,7 +586,7 @@ app.post('/webhook', async (req, res) => {
           bekleyenOnaylar.delete(tel);
           await mesajGonder(tel,
             `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
-            `*1* - 📋 Kiralama durumum\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem`
+            `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem`
           );
           return;
         } else {
@@ -547,27 +602,48 @@ app.post('/webhook', async (req, res) => {
     if (['merhaba','selam','menu','menü','hi','başla','baslat','başlat','hey'].includes(metin)) {
       await mesajGonder(tel,
         `👋 Merhaba *${musteriAd}*!\n\nGameRental'a hoş geldiniz 🎮\n\n` +
-        `*1* - 📋 Kiralama durumum\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n\nVeya sorunuzu yazın!`
+        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n\nVeya sorunuzu yazın!`
       );
       return;
     }
 
     // 1 — Kiralama durumu
     if (metin === '1' || metin.includes('durumum') || metin.includes('kiralamam')) {
-      if (!musteri || aktifKiralar.length === 0) {
-        await mesajGonder(tel, `📋 Aktif kiralama bulunmuyor.\n\nYeni kiralama için *5* yazın 🎮`);
-        return;
+      // Aktif kiralama varsa durumu + kural hatırlatması göster
+      if (musteri && aktifKiralar.length > 0) {
+        let txt = `📋 *Aktif Kiralamalarınız*\n\n`;
+        for (const k of aktifKiralar) {
+          const o = veri.oyunlar.find(x => x.id === k.oyunId);
+          const now = bugun();
+          const gecGun = k.bit < now ? gunFarki(k.bit, now) : 0;
+          const kalanGun = k.bit >= now ? gunFarki(now, k.bit) : 0;
+          txt += `🎮 *${o?.ad||'?'}* (${k.tip})\n📅 Bitiş: ${k.bit}\n`;
+          txt += gecGun > 0 ? `⚠️ *${gecGun} gün gecikmiş!*\n\n` : `✅ *${kalanGun} gün kaldı*\n\n`;
+        }
+        txt += `━━━━━━━━━━━━━━\n📌 *Hatırlatma*\n\n`;
+        txt += `• Süreniz dolduğunda hesaba erişmeye devam etmeyin\n`;
+        txt += `• 🔵 Primary bitince: önce ana hesabı devre dışı bırakın, sonra silin\n`;
+        txt += `• 🟣 Secondary bitince: hesabı direkt silebilirsiniz\n`;
+        txt += `• Sıra olan oyunlarda uzatma *1 kez* ile sınırlıdır`;
+        await mesajGonder(tel, txt);
+      } else {
+        // Aktif kiralama yoksa süreç + kuralları anlat
+        await mesajGonder(tel,
+          `📋 *Kiralama Süreci & Kurallar*\n\n` +
+          `*Nasıl kiralıyorum?*\n` +
+          `1️⃣ *5* yazarak müsait oyunları gör\n` +
+          `2️⃣ Oyunu ve kaç gün istediğini söyle\n` +
+          `3️⃣ IBAN'a ödemeyi yap, dekontu gönder\n` +
+          `4️⃣ Hesap bilgilerin iletilir ✅\n\n` +
+          `*📌 Önemli Kurallar*\n\n` +
+          `🔵 *Primary kiralama bitince:*\nÖnce PS hesabında "Ana Hesap"ı devre dışı bırakın, ardından hesabı silin.\n\n` +
+          `🟣 *Secondary kiralama bitince:*\nHesabı direkt silebilirsiniz.\n\n` +
+          `⏰ *Süre:*\nKiraladığınız gün kadar hesaba erişebilirsiniz. Süre dolduktan sonra hesaba erişmeye devam etmek güven ihlali sayılır.\n\n` +
+          `🔄 *Uzatma:*\nSırası olan oyunlarda uzatma hakkı yalnızca *1 kez* kullanılabilir.\n\n` +
+          `🎁 *Hediye Gün:*\nYeni çıkmış oyunlar hariç tüm oyunlarda 10 gün kiralamada *+5 gün hediye* otomatik eklenir.\n\n` +
+          `Yeni kiralama için *5* yazın 🎮`
+        );
       }
-      let txt = `📋 *Aktif Kiralamalarınız*\n\n`;
-      for (const k of aktifKiralar) {
-        const o = veri.oyunlar.find(x => x.id === k.oyunId);
-        const now = bugun();
-        const gecGun = k.bit < now ? gunFarki(k.bit, now) : 0;
-        const kalanGun = k.bit >= now ? gunFarki(now, k.bit) : 0;
-        txt += `🎮 *${o?.ad||'?'}* (${k.tip})\n📅 Bitiş: ${k.bit}\n`;
-        txt += gecGun > 0 ? `⚠️ *${gecGun} gün gecikmiş!*\n\n` : `✅ *${kalanGun} gün kaldı*\n\n`;
-      }
-      await mesajGonder(tel, txt);
       return;
     }
 
@@ -634,6 +710,13 @@ app.post('/webhook', async (req, res) => {
       }).join('\n');
       await mesajGonder(tel, `🎮 *Müsait Oyunlar*\n\n${liste}\n\nHangi oyunu kiralamak istiyorsunuz? (Numara veya isim yazın)`);
       bekleyenOnaylar.set(tel, { tip: 'kiralama_oyun_bekle', musteriId: musteri.id, musteriAd, musaitOyunlar });
+      return;
+    }
+
+    // ── SSS — Claude'a gitmeden önce keyword kontrolü ──
+    const sssCevap = sssKontrol(metin, musteriAd);
+    if (sssCevap) {
+      await mesajGonder(tel, sssCevap);
       return;
     }
 
