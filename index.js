@@ -158,13 +158,24 @@ function medyaVarMi(msg) {
 }
 
 // ── ANA WEBHOOK ──
+const islenenMesajlar = new Set(); // duplicate koruması
+
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
     const event = req.body;
-    if (event.event !== 'message' && event.event !== 'message.any') return;
+    if (event.event !== 'message') return;
     const msg = event.payload;
     if (!msg) return;
+
+    // Duplicate koruması — aynı mesaj ID'si tekrar gelirse atla
+    const msgId = msg.id || (msg.from + '_' + msg.timestamp);
+    if (islenenMesajlar.has(msgId)) return;
+    islenenMesajlar.add(msgId);
+    if (islenenMesajlar.size > 500) { // bellek temizliği
+      const arr = [...islenenMesajlar];
+      arr.slice(0, 250).forEach(k => islenenMesajlar.delete(k));
+    }
 
     // Grup mesajlarını atla
     if (msg.from && msg.from.includes('@g.us')) return;
@@ -365,6 +376,17 @@ app.post('/webhook', async (req, res) => {
     const aktifKiralar = musteri ? veri.kiralamalar.filter(k => k.musteriId === musteri.id && k.durum === 'aktif') : [];
     const aktifKira = aktifKiralar[0] || null;
 
+    // ── GENEL İPTAL — herhangi bir state'deyken "iptal" yazarsa menüye dön ──
+    const bekleyenKontrol = bekleyenOnaylar.get(tel);
+    if (bekleyenKontrol && (metin === 'iptal' || metin === 'vazgeç' || metin === 'vazgec' || metin === 'geri')) {
+      bekleyenOnaylar.delete(tel);
+      await mesajGonder(tel,
+        `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
+        `*1* - 📋 Kiralama durumum\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem`
+      );
+      return;
+    }
+
     // ── TELEFON BEKLEME ──
     const bekleyen = bekleyenOnaylar.get(tel);
     if (bekleyen?.tip === 'telefon_bekle') {
@@ -506,7 +528,12 @@ app.post('/webhook', async (req, res) => {
             await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n\n⚠️ Hesabı geri almayı unutma!`);
           }
         } else if (metin === 'hayır' || metin === 'hayir' || metin === 'iptal') {
-          await mesajGonder(tel, `İptal edildi 😊`);
+          bekleyenOnaylar.delete(tel);
+          await mesajGonder(tel,
+            `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
+            `*1* - 📋 Kiralama durumum\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem`
+          );
+          return;
         } else {
           await mesajGonder(tel, `İade için *evet*, iptal için *hayır* yazın.`);
           return;
