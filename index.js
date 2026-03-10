@@ -502,7 +502,7 @@ app.post('/webhook', async (req, res) => {
             aktifKira.durum = 'teslim';
             await setVeri(veri);
             const oyun = veri.oyunlar.find(o => o.id === aktifKira.oyunId);
-            await mesajGonder(tel, ` *${oyun?.ad}* için ✅ İade bildiriminiz alındı! Teşekkürler 🎮`);
+            await mesajGonder(tel, `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮`);
             await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n\n⚠️ Hesabı geri almayı unutma!`);
           }
         } else if (metin === 'hayır' || metin === 'hayir' || metin === 'iptal') {
@@ -664,6 +664,7 @@ async function yarinBitenKontrol() {
 async function gecikmeKontrol() {
   const veri = await getVeri(); if (!veri) return;
   const now = bugun();
+  const gecikmeOzet = [];
   for (const k of veri.kiralamalar.filter(k => k.durum === 'aktif' && k.bit < now)) {
     try {
       const s = await db.collection('botState').doc(`uyari_${k.id}`).get();
@@ -679,10 +680,71 @@ async function gecikmeKontrol() {
     await mesajGonder(hedef,
       `⚠️ *Gecikmiş İade*\n\nMerhaba!\n*${o?.ad}* *${gecGun} gün* gecikmiş.\nEkstra: *${fmt(gf*gecGun)}*\n\nİade için *3*, uzatmak için *2* yazın 🙏`
     );
+    gecikmeOzet.push(`• ${m.soyad||m.ad||m.tel} — ${o?.ad} (${gecGun}g, +${fmt(gf*gecGun)})`);
     try { await db.collection('botState').doc(`uyari_${k.id}`).set({ tarih: now }); } catch(e) {}
     await new Promise(r => setTimeout(r, 1000));
   }
+  // İşletmeciye özet
+  if (gecikmeOzet.length > 0) {
+    await banaGonder(`⚠️ *Gecikme Özeti* (${now})\n\n${gecikmeOzet.join('\n')}`);
+  }
 }
+
+async function rezervSiraKontrol() {
+  const veri = await getVeri(); if (!veri) return;
+  const now = bugun();
+
+  // Her oyun+tip kombinasyonu için kontrol et
+  const oyunTipCiftleri = new Set(
+    veri.rezervasyonlar.filter(r => r.durum === 'bekliyor')
+      .map(r => `${r.oyunId}_${r.tip}`)
+  );
+
+  for (const cift of oyunTipCiftleri) {
+    const [oyunIdStr, tip] = cift.split('_');
+    const oyunId = parseInt(oyunIdStr);
+    const o = veri.oyunlar.find(x => x.id === oyunId);
+    if (!o) continue;
+
+    // Slot müsait mi?
+    const aktifSayisi = veri.kiralamalar.filter(k => k.oyunId === oyunId && k.tip === tip && k.durum === 'aktif').length;
+    const maxSlot = tip === 'primary' ? (o.ciftPrimary ? 2 : 1) : 1;
+    if (aktifSayisi >= maxSlot) continue; // slot dolu, geç
+
+    // Slot müsait — sıradaki ilk kişiyi bul (atla=true olmayanlar)
+    const siralar = veri.rezervasyonlar
+      .filter(r => r.oyunId === oyunId && r.tip === tip && r.durum === 'bekliyor' && !r.atla)
+      .sort((a, b) => (a.sira || a.id) - (b.sira || b.id));
+
+    if (!siralar.length) continue;
+    const ilk = siralar[0];
+
+    // Bu kişiye bugün zaten bildirim attık mı?
+    const stateKey = `rezerv_bildirim_${ilk.id}`;
+    try {
+      const s = await db.collection('botState').doc(stateKey).get();
+      if (s.exists && s.data().tarih === now) continue;
+    } catch(e) {}
+
+    const m = veri.musteriler.find(x => x.id === ilk.musteriId);
+    if (!m) continue;
+    const hedef = m.whatsappLid || (m.tel ? temizTel(m.tel) + '@c.us' : null);
+    if (!hedef) continue;
+
+    const musteriAd = m.ad || m.soyad || m.tel;
+    const tipLabel = tip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
+
+    await mesajGonder(hedef,
+      `🎉 *Sıran Geldi!*\n\nMerhaba ${musteriAd}!\n\n*${o.ad}* için beklediğin slot artık müsait! ${tipLabel}\n\nKiralama için ödemeyi yapıp dekontu gönder, hemen aktifleştirelim 🚀\n\n💳 IBAN: ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`
+    );
+
+    await banaGonder(`🔔 *Rezerv Bildirimi Gönderildi*\n• ${musteriAd} → ${o.ad} (${tipLabel})`);
+
+    try { await db.collection('botState').doc(stateKey).set({ tarih: now }); } catch(e) {}
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
 
 // Restart sonrası hemen çalışmasın — ilk kontrol 1 saat sonra
 // Gecikme kontrolü: Firebase'e tarih yazar, aynı gün tekrar atmaz
@@ -696,7 +758,39 @@ setInterval(async () => {
   const saat = new Date().getHours();
   if (saat === 15) await yarinBitenKontrol();
   await gecikmeKontrol();
+  await rezervSiraKontrol();
 }, 60 * 60 * 1000);
+
+// ── TOPLU DUYURU API ──
+// Site buraya POST atar: { mesaj, alicilar: [{tel, ad}], apiKey }
+app.post('/api/duyuru', async (req, res) => {
+  const { mesaj, alicilar, apiKey } = req.body || {};
+
+  // Basit güvenlik: aynı WAHA api key ile doğrula
+  if (apiKey !== (CONFIG.WAHA_API_KEY || 'admin')) {
+    return res.status(401).json({ hata: 'Yetkisiz' });
+  }
+  if (!mesaj || !Array.isArray(alicilar) || alicilar.length === 0) {
+    return res.status(400).json({ hata: 'mesaj ve alicilar zorunlu' });
+  }
+
+  res.json({ durum: 'basliyor', toplam: alicilar.length });
+
+  // Arka planda gönder — her mesaj arasında 2sn bekle (spam koruması)
+  let basarili = 0, basarisiz = 0;
+  for (const kisi of alicilar) {
+    const tel = temizTel(String(kisi.tel || ''));
+    if (tel.length < 10) { basarisiz++; continue; }
+    const kisiMesaj = mesaj.replace('{isim}', kisi.ad || 'Değerli Müşterimiz');
+    await mesajGonder(tel, kisiMesaj);
+    basarili++;
+    await new Promise(r => setTimeout(r, 2000)); // 2sn ara
+  }
+
+  const ozet = `📣 Toplu duyuru tamamlandı\n✅ ${basarili} başarılı\n❌ ${basarisiz} başarısız`;
+  console.log(ozet);
+  await banaGonder(ozet);
+});
 
 app.get('/', (req, res) => res.send('🎮 GameRental Bot çalışıyor!'));
 app.listen(CONFIG.PORT, () => {
