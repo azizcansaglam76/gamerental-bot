@@ -437,7 +437,7 @@ app.post('/webhook', async (req, res) => {
       bekleyenOnaylar.delete(tel);
       await mesajGonder(tel,
         `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
-        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem`
+        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş`
       );
       return;
     }
@@ -477,15 +477,37 @@ app.post('/webhook', async (req, res) => {
 
       // Kiralama akışı — oyun seçimi
       if (bekleyen.tip === 'kiralama_oyun_bekle') {
-        const { musaitOyunlar } = bekleyen;
+        const { musaitOyunlar, kiradaOyunlar = [] } = bekleyen;
         let secilen = null;
+        let secilenKirada = false;
         const sayi = parseInt(metin);
         if (!isNaN(sayi) && sayi >= 1 && sayi <= musaitOyunlar.length) {
           secilen = musaitOyunlar[sayi - 1];
         } else {
           secilen = musaitOyunlar.find(o => o.ad.toLowerCase().includes(metin));
         }
+        // Müsait değil ama kirada olanlar arasında var mı?
+        if (!secilen) {
+          secilenKirada = true;
+          secilen = kiradaOyunlar.find(o => o.ad.toLowerCase().includes(metin));
+        }
         if (!secilen) { await mesajGonder(tel, `Oyun bulunamadı. Listeden numara veya isim yazın.`); return; }
+
+        // Kirada oyun seçildi → sıraya gir seçeneği sun
+        if (secilenKirada) {
+          const siradaki = (veri.rezervasyonlar||[]).filter(r => r.oyunId === secilen.id && r.durum === 'bekliyor').length;
+          const pri = gunlukFiyat(secilen, 'primary');
+          const sec = gunlukFiyat(secilen, 'secondary');
+          await mesajGonder(tel,
+            `⏳ *${secilen.ad}* şu an kirada.\n\n` +
+            `${siradaki > 0 ? `👥 Sırada ${siradaki} kişi var.\n\n` : ''}` +
+            `🔵 Primary: ${fmt(pri)}/gün\n🟣 Secondary: ${fmt(sec)}/gün\n\n` +
+            `Sıraya girmek ister misiniz? Slot açılınca size haber verilir 🔔\n\n*1* - 🔵 Primary sıraya gir\n*2* - 🟣 Secondary sıraya gir\n*iptal* - Vazgeç`
+          );
+          bekleyenOnaylar.set(tel, { tip: 'rezerv_tip_bekle', musteriId: musteri.id, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad });
+          return;
+        }
+
         const pri = gunlukFiyat(secilen, 'primary');
         const sec = gunlukFiyat(secilen, 'secondary');
         await mesajGonder(tel, `🎮 *${secilen.ad}* seçildi!\n\n🔵 Primary: ${fmt(pri)}/gün\n🟣 Secondary: ${fmt(sec)}/gün\n\nHangi tipi tercih edersiniz?\n*1* - 🔵 Primary\n*2* - 🟣 Secondary`);
@@ -494,6 +516,40 @@ app.post('/webhook', async (req, res) => {
       }
 
       // Kiralama akışı — tip seçimi
+      // Rezervasyon akışı — tip seçimi
+      if (bekleyen.tip === 'rezerv_tip_bekle') {
+        let kiraTip = null;
+        if (metin.includes('primary') || metin === '1') kiraTip = 'primary';
+        else if (metin.includes('secondary') || metin === '2') kiraTip = 'secondary';
+        if (!kiraTip) { await mesajGonder(tel, `*1* - 🔵 Primary\n*2* - 🟣 Secondary`); return; }
+
+        // Firebase'e rezervasyon ekle
+        const veri2 = await getVeri();
+        if (!veri2.rezervasyonlar) veri2.rezervasyonlar = [];
+        const siradakiSayi = veri2.rezervasyonlar.filter(r => r.oyunId === bekleyen.oyunId && r.tip === kiraTip && r.durum === 'bekliyor').length;
+        const yeniRezervId = (veri2.nextId?.r || 1);
+        if (!veri2.nextId) veri2.nextId = {};
+        veri2.nextId.r = yeniRezervId + 1;
+        veri2.rezervasyonlar.push({
+          id: yeniRezervId,
+          oyunId: bekleyen.oyunId,
+          musteriId: bekleyen.musteriId,
+          tip: kiraTip,
+          tarih: bugun(),
+          notlar: 'Bot üzerinden eklendi',
+          durum: 'bekliyor',
+          alinantarih: bugun()
+        });
+        await setVeri(veri2);
+        bekleyenOnaylar.delete(tel);
+        const tipLabel = kiraTip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
+        await mesajGonder(tel,
+          `✅ *${bekleyen.oyunAd}* için sıraya girdiniz!\n\n${tipLabel}\n📍 Sıra numaranız: ${siradakiSayi + 1}\n\nSlot açılınca size otomatik bildirim gönderilir 🔔`
+        );
+        await banaGonder(`🔔 *Yeni Rezervasyon (Bot)*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd} (${tipLabel})\n📍 Sıra: ${siradakiSayi + 1}`);
+        return;
+      }
+
       if (bekleyen.tip === 'kiralama_tip_bekle') {
         let kiraTip = null;
         if (metin.includes('primary') || metin === '1') kiraTip = 'primary';
@@ -586,7 +642,7 @@ app.post('/webhook', async (req, res) => {
           bekleyenOnaylar.delete(tel);
           await mesajGonder(tel,
             `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
-            `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem`
+            `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş`
           );
           return;
         } else {
@@ -602,7 +658,7 @@ app.post('/webhook', async (req, res) => {
     if (['merhaba','selam','menu','menü','hi','başla','baslat','başlat','hey'].includes(metin)) {
       await mesajGonder(tel,
         `👋 Merhaba *${musteriAd}*!\n\nGameRental'a hoş geldiniz 🎮\n\n` +
-        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n\nVeya sorunuzu yazın!`
+        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n\nVeya sorunuzu yazın!`
       );
       return;
     }
@@ -697,19 +753,35 @@ app.post('/webhook', async (req, res) => {
         await banaGonder(`🛒 *Kayıtsız Kiralama Talebi*\nWhatsApp: ${tel}\nMesaj: "${metinOrijinal}"`);
         return;
       }
-      const musaitOyunlar = veri.oyunlar.filter(o => {
-        if (o.deaktif) return false;
+      const tumOyunlar = veri.oyunlar.filter(o => !o.deaktif);
+      const musaitOyunlar = tumOyunlar.filter(o => {
         const kirada = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif').length;
         return kirada < ((o.kopyalar?.length||0) + 1);
       });
-      if (musaitOyunlar.length === 0) { await mesajGonder(tel, `Şu an müsait oyun bulunmuyor 😔`); return; }
-      const liste = musaitOyunlar.map((o, i) => {
+      const kiradaOyunlar = tumOyunlar.filter(o => {
+        const kirada = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif').length;
+        return kirada >= ((o.kopyalar?.length||0) + 1);
+      });
+
+      let liste = '';
+      musaitOyunlar.forEach((o, i) => {
         const pri = gunlukFiyat(o, 'primary');
         const sec = gunlukFiyat(o, 'secondary');
-        return `*${i+1}* - ${o.ad} (${o.platform}) | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün`;
-      }).join('\n');
-      await mesajGonder(tel, `🎮 *Müsait Oyunlar*\n\n${liste}\n\nHangi oyunu kiralamak istiyorsunuz? (Numara veya isim yazın)`);
-      bekleyenOnaylar.set(tel, { tip: 'kiralama_oyun_bekle', musteriId: musteri.id, musteriAd, musaitOyunlar });
+        liste += `*${i+1}* - ✅ ${o.ad} (${o.platform}) | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün\n`;
+      });
+      if (kiradaOyunlar.length > 0) {
+        liste += `\n⏳ *Şu an kirada (sıraya girebilirsin):*\n`;
+        kiradaOyunlar.forEach(o => {
+          const pri = gunlukFiyat(o, 'primary');
+          const sec = gunlukFiyat(o, 'secondary');
+          const siradaki = (veri.rezervasyonlar||[]).filter(r => r.oyunId === o.id && r.durum === 'bekliyor').length;
+          liste += `❌ ${o.ad} (${o.platform}) | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün${siradaki > 0 ? ` | 👥 ${siradaki} kişi sırada` : ''}\n`;
+        });
+      }
+
+      if (!liste) { await mesajGonder(tel, `Şu an müsait oyun bulunmuyor 😔`); return; }
+      await mesajGonder(tel, `🎮 *Oyun Listesi*\n\n${liste}\nKiralamak veya sıraya girmek istediğiniz oyunun adını ya da numarasını yazın.`);
+      bekleyenOnaylar.set(tel, { tip: 'kiralama_oyun_bekle', musteriId: musteri.id, musteriAd, musaitOyunlar, kiradaOyunlar });
       return;
     }
 
@@ -735,9 +807,19 @@ app.post('/webhook', async (req, res) => {
       await banaGonder(`🎮 *Kiralama Talebi*\n👤 ${musteriAd}\n💬 "${metinOrijinal}"`);
     }
 
-    // Görüşme talebi bildirimi
-    if (metin.includes('görüşmek') || metin.includes('konuşmak') || metin.includes('aramak') || metin.includes('arayabilir')) {
-      await banaGonder(`📞 *Görüşme Talebi*\n👤 ${musteriAd} (${tel})\n💬 "${metinOrijinal}"`);
+    // 7 — Yetkili ile görüş
+    if (metin === '7' || metin.includes('yetkili') || metin.includes('hocam') ||
+        metin.includes('insan') || metin.includes('sizi') || metin.includes('sizinle') ||
+        metin.includes('görüşmek') || metin.includes('konuşmak') || metin.includes('aramak') ||
+        metin.includes('arayabilir') || metin.includes('yetkiliye') || metin.includes('sahibi')) {
+      await mesajGonder(tel,
+        `👤 *Yetkili ile Görüşme*\n\n` +
+        `Mesajınız alındı, yetkili en kısa sürede sizinle ilgilenecek 🙏\n\n` +
+        `Lütfen bekleyin, bağlanıyor...`
+      );
+      await banaGonder(`🔔 *Yetkili Talebi*\n\n👤 ${musteriAd}\n📞 ${tel}\n💬 "${metinOrijinal}"\n\nMüşteri seninle görüşmek istiyor!`);
+      insanDevraldi.set(tel, Date.now());
+      return;
     }
 
     try {
