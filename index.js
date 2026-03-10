@@ -140,7 +140,7 @@ function sssKontrol(metin, musteriAd) {
   return null; // SSS eşleşmedi, Claude'a git
 }
 
-
+async function mesajGonder(tel, metin) {
   try {
     const chatId = tel.includes('@') ? tel : tel + '@c.us';
     await axios.post(`${CONFIG.WAHA_URL}/api/sendText`,
