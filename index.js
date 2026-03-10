@@ -502,7 +502,7 @@ app.post('/webhook', async (req, res) => {
             aktifKira.durum = 'teslim';
             await setVeri(veri);
             const oyun = veri.oyunlar.find(o => o.id === aktifKira.oyunId);
-            await mesajGonder(tel, `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮`);
+            await mesajGonder(tel, ` *${oyun?.ad}* için ✅ İade bildiriminiz alındı! Teşekkürler 🎮`);
             await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n\n⚠️ Hesabı geri almayı unutma!`);
           }
         } else if (metin === 'hayır' || metin === 'hayir' || metin === 'iptal') {
