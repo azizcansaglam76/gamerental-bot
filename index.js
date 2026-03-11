@@ -163,7 +163,9 @@ async function banaGonder(metin) {
 const bekleyenOnaylar = new Map();
 const insanDevraldi = new Map(); // tel -> timestamp
 const INSAN_SURESI = 30 * 60 * 1000;
-let benimLid = null;
+let benimLid = process.env.BENIM_LID || null;
+// İlk mesajda otomatik öğren
+
 
 // ── RESET KOMUTU için tüm state temizle ──
 function stateTemizle(tel) {
@@ -214,9 +216,19 @@ app.post('/webhook', async (req, res) => {
     const medya = medyaVarMi(msg);
 
     // ── KENDİ MESAJLARIM ──
-    const benimTelSade = (CONFIG.BENIM_NUMARAM || '').replace(/[^0-9]/g,'');
+    const benimTelSade = (CONFIG.BENIM_NUMARAM || '').replace(/[^0-9]/g,'').replace(/^90/,'');
     const telNumara = tel.replace('@c.us','').replace('@lid','').replace(/[^0-9]/g,'');
-    const benimMesajim = msg.fromMe || telNumara === benimTelSade || tel === benimLid;
+    const benimLidKayitli = (process.env.BENIM_LID || benimLid || '').replace(/[^0-9]/g,'');
+    // Telefon numarası sonu veya LID eşleşmesi
+    const benimMesajim = msg.fromMe
+      || tel === benimLid
+      || telNumara === benimLidKayitli
+      || (benimTelSade.length >= 9 && telNumara.endsWith(benimTelSade))
+      || (benimTelSade.length >= 9 && telNumara.slice(-9) === benimTelSade.slice(-9));
+    
+    if (metinOrijinal && metinOrijinal.startsWith('#')) {
+      console.log(`🔍 DEBUG: tel=${tel} telNumara=${telNumara} benimTelSade=${benimTelSade} benimLidKayitli=${benimLidKayitli} fromMe=${msg.fromMe} benimMesajim=${benimMesajim}`);
+    }
 
     // LID'i kaydet
     if (benimMesajim && !benimLid) { benimLid = tel; console.log(`📱 Benim LID: ${benimLid}`); }
