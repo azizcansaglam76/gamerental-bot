@@ -154,33 +154,6 @@ async function banaGonder(metin) {
   if (CONFIG.BENIM_NUMARAM) await mesajGonder(CONFIG.BENIM_NUMARAM, metin);
 }
 
-// ── CLAUDE ──
-const konusmalar = new Map();
-async function claudeCevap(musteriAd, mesaj, gecmis, oyunlar) {
-  const hist = konusmalar.get(musteriAd) || [];
-  hist.push({ role: 'user', content: mesaj });
-  const kisaltilmis = hist.slice(-6);
-  const res = await axios.post('https://api.anthropic.com/v1/messages', {
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 400,
-    system: `Sen GameRental PlayStation oyun kiralama işletmesinin WhatsApp asistanısın.
-Müşteri: ${musteriAd} | Geçmiş: ${gecmis}
-
-Oyunlar:
-${oyunlar}
-
-Kurallar: Kısa/samimi cevap ver. Türkçe. Max 4-5 cümle.
-Kiralama talebinde "işletmecimiz sizinle iletişime geçecek" de.
-PS hesabı konsolda oynatır, min 5 gün, ödeme havale/EFT.`,
-    messages: kisaltilmis,
-  }, { headers: { 'x-api-key': CONFIG.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } });
-  const cevap = res.data.content[0].text;
-  hist.push({ role: 'assistant', content: cevap });
-  if (hist.length > 20) hist.splice(0, 2);
-  konusmalar.set(musteriAd, hist);
-  return cevap;
-}
-
 // ── STATE ──
 // bekleyenOnaylar: tel -> { tip, ... }
 // tipler: telefon_bekle | kiralama_oyun_bekle | kiralama_tip_bekle | kiralama_gun_bekle
@@ -196,7 +169,6 @@ let benimLid = null;
 function stateTemizle(tel) {
   bekleyenOnaylar.delete(tel);
   insanDevraldi.delete(tel);
-  konusmalar.delete(tel);
 }
 
 // ── MEDYA KONTROLÜ ──
@@ -271,7 +243,6 @@ app.post('/webhook', async (req, res) => {
       if (metin === '#reset') {
         bekleyenOnaylar.clear();
         insanDevraldi.clear();
-        konusmalar.clear();
         benimLid = null;
         await banaGonder('🔄 Bot sıfırlandı! Tüm bekleyen işlemler temizlendi.');
         return;
@@ -817,16 +788,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // ── CLAUDE'A YÖNLENDIR ──
-    const gecmis = musteri
-      ? `${veri.kiralamalar.filter(k=>k.musteriId===musteri.id).length} kiralama, ${aktifKira?'aktif var (bitiş:'+aktifKira.bit+')':'aktif yok'}`
-      : 'Kayıtsız';
-    const oyunlarStr = veri.oyunlar.filter(o=>!o.deaktif).map(o => {
-      const kirada = veri.kiralamalar.filter(k=>k.oyunId===o.id&&k.durum==='aktif').length;
-      const musait = ((o.kopyalar?.length||0)+1) - kirada > 0;
-      return `${o.ad} (${o.platform}, Primary:${fmt(gunlukFiyat(o,'primary'))}, Secondary:${fmt(gunlukFiyat(o,'secondary'))}, ${musait?'müsait':'kirada'})`;
-    }).join('\n');
-
     // Kiralama talebi bildirimi
     if (metin.includes('kiralamak') || metin.includes('kiralayabilir')) {
       await banaGonder(`🎮 *Kiralama Talebi*\n👤 ${musteriAd}\n💬 "${metinOrijinal}"`);
@@ -847,18 +808,11 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    try {
-      const cevap = await claudeCevap(musteriAd, metinOrijinal, gecmis, oyunlarStr);
-      await mesajGonder(tel, cevap);
-    } catch (e) {
-      console.error('Claude hatası:', e.message, e.response?.data);
-      // Kredi bitti veya API hatası — menüye yönlendir
-      await mesajGonder(tel,
-        `Merhaba ${musteriAd}! Size yardımcı olmak isterim 😊\n\n` +
-        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş`
-      );
-      await banaGonder(`⚠️ Claude API hatası!\n${musteriAd}: "${metinOrijinal}"\n${e.message}`);
-    }
+    // Anlaşılmayan mesaj — menüye yönlendir
+    await mesajGonder(tel,
+      `Merhaba ${musteriAd}! 😊\n\nAşağıdaki seçeneklerden birini yazabilirsin:\n\n` +
+      `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş`
+    );
 
   } catch (err) {
     console.error('Webhook genel hata:', err.message, err.stack);
