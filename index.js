@@ -162,7 +162,7 @@ async function banaGonder(metin) {
 //         iade_onay
 const bekleyenOnaylar = new Map();
 const insanDevraldi = new Map(); // tel -> timestamp
-const INSAN_SURESI = 30 * 60 * 1000;
+const INSAN_SURESI = 8 * 60 * 60 * 1000; // 8 saat (pratik olarak kalıcı)
 let benimLid = process.env.BENIM_LID || null;
 // İlk mesajda otomatik öğren
 
@@ -193,9 +193,20 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
     const event = req.body;
-    if (event.event !== 'message') return;
     const msg = event.payload;
     if (!msg) return;
+
+    // Giden mesaj (fromMe) — sadece susturma için işle
+    if (event.event === 'message.any' && msg.fromMe && msg.to) {
+      const body = (msg.body || '').trim();
+      if (!body.startsWith('#')) {
+        insanDevraldi.set(msg.to, Date.now());
+        console.log(`👤 Giden mesaj → susturuldu: ${msg.to}`);
+      }
+      return;
+    }
+
+    if (event.event !== 'message') return;
 
     // Duplicate koruması — aynı mesaj ID'si tekrar gelirse atla
     const msgId = msg.id || (msg.from + '_' + msg.timestamp);
