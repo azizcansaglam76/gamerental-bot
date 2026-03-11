@@ -754,7 +754,7 @@ app.post('/webhook', async (req, res) => {
       const o = veri.oyunlar.find(x => x.id === aktifKira.oyunId);
       const gf = gunlukFiyat(o, aktifKira.tip);
       await mesajGonder(tel, `🔄 *Süre Uzatma*\n\n🎮 *${o?.ad}*\n📅 Bitiş: ${aktifKira.bit}\n💰 Günlük: ${fmt(gf)}\n\nKaç gün uzatmak istiyorsunuz?`);
-      bekleyenOnaylar.set(tel, { tip: 'uzatma_gun_bekle', kiraId: aktifKira.id, gunluk: gf });
+      bekleyenOnaylar.set(tel, { tip: 'uzatma_gun_bekle', kiraId: aktifKira.id, musteriId: aktifKira.musteriId, gunluk: gf });
       return;
     }
 
