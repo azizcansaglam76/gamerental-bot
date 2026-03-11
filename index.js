@@ -287,7 +287,9 @@ app.post('/webhook', async (req, res) => {
         const hedefTel = metinOrijinal.split(' ')[1];
         if (!hedefTel) { await banaGonder('Kullanım: #onayla 905xxxxxxxxx'); return; }
 
-        // Hem @c.us hem @lid formatında ara
+        const hedefSade = hedefTel.replace(/[^0-9]/g,'').replace(/^90/,'');
+
+        // 1) Direkt key ile ara (@c.us ve @lid)
         const araKeys = [
           hedefTel.includes('@') ? hedefTel : hedefTel + '@c.us',
           hedefTel.replace(/[^0-9]/g,'') + '@lid',
@@ -296,6 +298,18 @@ app.post('/webhook', async (req, res) => {
         let hedefBekleyen = null;
         for (const k of araKeys) {
           if (bekleyenOnaylar.has(k)) { hedefKey = k; hedefBekleyen = bekleyenOnaylar.get(k); break; }
+        }
+
+        // 2) Bulunamazsa tüm bekleyenler arasında müşteri telefonu ile eşleştir
+        if (!hedefBekleyen) {
+          const veriAra = await getVeri();
+          for (const [key, val] of bekleyenOnaylar.entries()) {
+            if (!val.musteriId) continue;
+            const m = veriAra.musteriler.find(x => x.id === val.musteriId);
+            if (!m) continue;
+            const mTel = (m.tel||'').replace(/[^0-9]/g,'').replace(/^0/,'').replace(/^90/,'');
+            if (mTel === hedefSade) { hedefKey = key; hedefBekleyen = val; break; }
+          }
         }
 
         if (!hedefBekleyen) { await banaGonder(`Bekleyen işlem yok: ${hedefTel}`); return; }
