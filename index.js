@@ -225,10 +225,7 @@ app.post('/webhook', async (req, res) => {
       || telNumara === benimLidKayitli
       || (benimTelSade.length >= 9 && telNumara.endsWith(benimTelSade))
       || (benimTelSade.length >= 9 && telNumara.slice(-9) === benimTelSade.slice(-9));
-    
-    if (metinOrijinal && metinOrijinal.startsWith('#')) {
-      console.log(`🔍 DEBUG: tel=${tel} telNumara=${telNumara} benimTelSade=${benimTelSade} benimLidKayitli=${benimLidKayitli} fromMe=${msg.fromMe} benimMesajim=${benimMesajim}`);
-    }
+
 
     // LID'i kaydet
     if (benimMesajim && !benimLid) { benimLid = tel; console.log(`📱 Benim LID: ${benimLid}`); }
@@ -237,13 +234,12 @@ app.post('/webhook', async (req, res) => {
       if (metinOrijinal.startsWith('#')) {
         // # komutu — aşağıda işle
       } else {
-        // Normal mesaj — müşteriye yazdıysam botu sustur
-        const hedef = msg.to || msg.from;
-        if (hedef && !benimMesajim) insanDevraldi.set(hedef, Date.now());
-        // fromMe ise msg.to müşterinin numarası
-        if (msg.fromMe && msg.to) {
-          insanDevraldi.set(msg.to, Date.now());
-          console.log(`👤 İşletmeci yazdı → bot susturuldu: ${msg.to}`);
+        // Ben müşteriye yazdım — müşteriyi sustur
+        // msg.to veya msg.from içinden müşteri telini bul
+        const hedef = msg.fromMe ? msg.to : (tel !== benimLid ? tel : null);
+        if (hedef) {
+          insanDevraldi.set(hedef, Date.now());
+          console.log(`👤 İşletmeci yazdı → bot susturuldu: ${hedef}`);
         }
         return;
       }
@@ -279,8 +275,9 @@ app.post('/webhook', async (req, res) => {
       if (metin.startsWith('#devral')) {
         const hedef = metinOrijinal.split(' ')[1];
         if (hedef) {
-          const k = hedef.includes('@') ? hedef : hedef + '@c.us';
-          insanDevraldi.set(k, Date.now());
+          const sade = hedef.replace(/[^0-9]/g,'');
+          insanDevraldi.set(sade + '@c.us', Date.now());
+          insanDevraldi.set(sade + '@lid', Date.now());
           await banaGonder(`👤 Bot susturuldu: ${hedef} (30 dk)`);
         }
         return;
@@ -290,8 +287,9 @@ app.post('/webhook', async (req, res) => {
       if (metin.startsWith('#bota')) {
         const hedef = metinOrijinal.split(' ')[1];
         if (hedef) {
-          const k = hedef.includes('@') ? hedef : hedef + '@c.us';
-          insanDevraldi.delete(k);
+          const sade = hedef.replace(/[^0-9]/g,'');
+          insanDevraldi.delete(sade + '@c.us');
+          insanDevraldi.delete(sade + '@lid');
           await banaGonder(`🤖 Bot aktif: ${hedef}`);
         }
         return;
@@ -333,15 +331,16 @@ app.post('/webhook', async (req, res) => {
         // Yeni kiralama onayla
         if (hedefBekleyen.tip === 'yeni_kiralama_bekle') {
           const yeniId = (veri2.nextId?.k || 400) + 1;
-          const bas = bugun();
-          const bit = tarihEkle(bas, hedefBekleyen.gun);
+          const bas = hedefBekleyen.bas || bugun();
+          const bit = hedefBekleyen.bit || tarihEkle(bas, hedefBekleyen.toplamGun || hedefBekleyen.gun);
+          const hediyeGun = hedefBekleyen.hediye || 0;
           // Tier kontrolü — ÖNCE (kiralama eklenmeden)
           const tierOncesi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
           veri2.kiralamalar.push({
             id: yeniId, oyunId: hedefBekleyen.oyunId, musteriId: hedefBekleyen.musteriId,
             tip: hedefBekleyen.kiraTip, bas, bit,
             ucret: hedefBekleyen.ucret, indirim: 0, net: hedefBekleyen.ucret,
-            onOdeme: hedefBekleyen.ucret, hediyeGun: 0, notlar: 'Bot ile eklendi', durum: 'aktif',
+            onOdeme: hedefBekleyen.ucret, hediyeGun, notlar: 'Bot ile eklendi', durum: 'aktif',
           });
           if (!veri2.nextId) veri2.nextId = {};
           veri2.nextId.k = yeniId;
@@ -350,7 +349,9 @@ app.post('/webhook', async (req, res) => {
           // Tier kontrolü — SONRA
           const tierSonrasi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
           const tierAtladi = tierOncesi.seviye !== tierSonrasi.seviye;
-          let onayMesaj = `✅ *Ödemeniz onaylandı!*\n\n🎮 *${hedefBekleyen.oyunAd}*\n📅 ${bas} → ${bit}\n💰 ${fmt(hedefBekleyen.ucret)}\n\nHesap bilgileri için işletmecimiz kısa sürede sizinle iletişime geçecek 🙏`;
+          let onayMesaj = `✅ *Ödemeniz onaylandı!*\n\n🎮 *${hedefBekleyen.oyunAd}*\n📅 ${bas} → ${bit}`;
+          if (hediyeGun > 0) onayMesaj += ` 🎁 *(+${hediyeGun} gün hediye)*`;
+          onayMesaj += `\n💰 ${fmt(hedefBekleyen.ucret)}\n\nHesap bilgileri için işletmecimiz kısa sürede sizinle iletişime geçecek 🙏`;
           if (tierAtladi) {
             onayMesaj += `\n\n🎉 *Tebrikler!* ${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} *${tierSonrasi.label}* seviyesine yükseldin!`;
             if (tierSonrasi.indirim > 0) onayMesaj += `\n✨ Artık *%${tierSonrasi.indirim} indirim* hakkın var!`;
@@ -359,7 +360,7 @@ app.post('/webhook', async (req, res) => {
           if (tierAtladi) {
             await banaGonder(`🏅 *Tier Değişimi*\n👤 ${hedefBekleyen.musteriAd}\n${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} ${tierSonrasi.label}`);
           }
-          await banaGonder(`✅ Kiralama eklendi!\n🎮 ${hedefBekleyen.oyunAd}\n👤 ${hedefBekleyen.musteriAd}\n📅 ${bas} → ${bit}\n\n⚠️ Hesabı paylaşmayı unutma!`);
+          await banaGonder(`✅ Kiralama eklendi!\n🎮 ${hedefBekleyen.oyunAd}\n👤 ${hedefBekleyen.musteriAd}\n📅 ${bas} → ${bit}${hediyeGun > 0 ? ` (+${hediyeGun} gün hediye)` : ''}\n\n⚠️ Hesabı paylaşmayı unutma!`);
           return;
         }
 
@@ -410,7 +411,10 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ── İNSAN DEVRALMA KONTROLÜ ──
-    const devralZamani = insanDevraldi.get(tel);
+    const telSade = tel.replace(/[^0-9]/g,'');
+    const devralZamani = insanDevraldi.get(tel)
+      || insanDevraldi.get(telSade + '@c.us')
+      || insanDevraldi.get(telSade + '@lid');
     if (devralZamani && Date.now() - devralZamani < INSAN_SURESI) {
       console.log(`🤫 Susturuldu: ${tel}`);
       return;
@@ -427,6 +431,12 @@ app.post('/webhook', async (req, res) => {
       const sade = tel.replace('@c.us','').replace(/^90/,'');
       musteri = veri.musteriler.find(m => m.tel && m.tel.replace(/[^0-9]/g,'').replace(/^0/,'') === sade);
     }
+    // LID ile geldi ama whatsappLid kayıtlı değil → telefon numarasıyla da ara
+    if (!musteri && isLid) {
+      const lidSade = tel.replace('@lid','');
+      // Daha önce bu LID'i başka bir müşteriyle eşleştirdik mi diye bak
+      musteri = veri.musteriler.find(m => (m.whatsappLid||'').replace('@lid','') === lidSade);
+    }
     if (musteri && isLid && !musteri.whatsappLid) {
       musteri.whatsappLid = tel;
       try { await setVeri(veri); } catch(e) {}
@@ -435,6 +445,7 @@ app.post('/webhook', async (req, res) => {
     const musteriAd = musteri ? ((musteri.ad||'') + ' ' + (musteri.soyad||'')).trim() || musteri.tel || 'Müşteri' : 'Misafir';
     const aktifKiralar = musteri ? veri.kiralamalar.filter(k => k.musteriId === musteri.id && k.durum === 'aktif') : [];
     const aktifKira = aktifKiralar[0] || null;
+
 
     // ── GENEL İPTAL — herhangi bir state'deyken "iptal" yazarsa menüye dön ──
     const bekleyenKontrol = bekleyenOnaylar.get(tel);
@@ -458,7 +469,7 @@ app.post('/webhook', async (req, res) => {
           bulunan.whatsappLid = tel;
           await setVeri(veri);
           await mesajGonder(tel,
-            `✅ Merhaba *${(bulunan.ad||bulunan.soyad||'').trim()}*!\n\n*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama`
+            `✅ Merhaba *${(bulunan.ad||bulunan.soyad||'').trim()}*!\n\n*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş`
           );
         } else {
           await mesajGonder(tel, `Sistemde kayıtlı bulunamadınız. Kayıt için işletmecimize ulaşın 🎮`);
@@ -586,13 +597,18 @@ app.post('/webhook', async (req, res) => {
         if (isNaN(gun) || gun < 5) { await mesajGonder(tel, `Minimum 5 gün. Kaç gün?`); return; }
         const ucret = bekleyen.gunluk * gun;
         const bas = bugun();
-        const bit = tarihEkle(bas, gun);
-        await mesajGonder(tel,
-          `📋 *Kiralama Özeti*\n\n🎮 *${bekleyen.oyunAd}*\n🎯 ${bekleyen.kiraTip}\n📅 ${gun} gün (${bas} → ${bit})\n💰 Toplam: *${fmt(ucret)}*\n\n` +
-          `*Ödeme Bilgileri:*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\n` +
-          `Ödemeyi yaptıktan sonra dekontu buraya gönderin 📎`
-        );
-        bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont', gun, ucret, bas, bit });
+        // Hediye gün hesapla: 10+ günde yeni çıkmış değilse +5
+        const oyunHediye = veri.oyunlar.find(o => o.id === bekleyen.oyunId);
+        const yeniOyun = oyunHediye?.yeniOyun || false;
+        const hediye = (!yeniOyun && gun >= 10) ? 5 : 0;
+        const toplamGun = gun + hediye;
+        const bit = tarihEkle(bas, toplamGun);
+        let ozet = `📋 *Kiralama Özeti*\n\n🎮 *${bekleyen.oyunAd}*\n🎯 ${bekleyen.kiraTip}\n📅 ${gun} gün`;
+        if (hediye > 0) ozet += ` *+${hediye} gün hediye 🎁*`;
+        ozet += ` (${bas} → ${bit})\n💰 Toplam: *${fmt(ucret)}*\n\n`;
+        ozet += `*Ödeme Bilgileri:*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\nÖdemeyi yaptıktan sonra dekontu buraya gönderin 📎`;
+        await mesajGonder(tel, ozet);
+        bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont', gun, hediye, toplamGun, ucret, bas, bit });
         return;
       }
 
