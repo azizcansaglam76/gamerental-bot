@@ -207,15 +207,29 @@ app.post('/webhook', async (req, res) => {
     // Grup mesajlarını atla
     if (msg.from && msg.from.includes('@g.us')) return;
 
-    // ── KENDİ MESAJLARIM (fromMe) ──
-    if (msg.fromMe) {
-      if (!benimLid) { benimLid = msg.from; console.log(`📱 Benim LID: ${benimLid}`); }
-      const metinFM = (msg.body || '').trim();
-      if (metinFM.startsWith('#')) {
-        // # komutu — işletmeci komutu olarak işle, aşağı devam et
+    const tel = msg.from;
+    if (!tel) return;
+    const metin = (msg.body || '').trim().toLowerCase();
+    const metinOrijinal = (msg.body || '').trim();
+    const medya = medyaVarMi(msg);
+
+    // ── KENDİ MESAJLARIM ──
+    const benimTelSade = (CONFIG.BENIM_NUMARAM || '').replace(/[^0-9]/g,'');
+    const telNumara = tel.replace('@c.us','').replace('@lid','').replace(/[^0-9]/g,'');
+    const benimMesajim = msg.fromMe || telNumara === benimTelSade || tel === benimLid;
+
+    // LID'i kaydet
+    if (benimMesajim && !benimLid) { benimLid = tel; console.log(`📱 Benim LID: ${benimLid}`); }
+
+    if (benimMesajim) {
+      if (metinOrijinal.startsWith('#')) {
+        // # komutu — aşağıda işle
       } else {
         // Normal mesaj — müşteriye yazdıysam botu sustur
-        if (msg.to) {
+        const hedef = msg.to || msg.from;
+        if (hedef && !benimMesajim) insanDevraldi.set(hedef, Date.now());
+        // fromMe ise msg.to müşterinin numarası
+        if (msg.fromMe && msg.to) {
           insanDevraldi.set(msg.to, Date.now());
           console.log(`👤 İşletmeci yazdı → bot susturuldu: ${msg.to}`);
         }
@@ -223,18 +237,7 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    const tel = msg.fromMe ? (CONFIG.BENIM_NUMARAM + '@c.us') : msg.from;
-    if (!tel) return;
-    const metin = (msg.body || '').trim().toLowerCase();
-    const metinOrijinal = (msg.body || '').trim();
-    const medya = medyaVarMi(msg);
-
-    console.log(`📨 ${msg.from} → "${metin.slice(0,40)}" | medya:${medya} | type:${msg.type}`);
-
-    // ── İŞLETMECİ NUMARASI KONTROLÜ ──
-    const benimTelSade = (CONFIG.BENIM_NUMARAM || '').replace(/[^0-9]/g,'');
-    const telNumara = tel.replace('@c.us','').replace('@lid','').replace(/[^0-9]/g,'');
-    const benimMesajim = msg.fromMe || telNumara === benimTelSade || tel === benimLid;
+    console.log(`📨 ${tel} → "${metin.slice(0,40)}" | fromMe:${msg.fromMe} | benimMesajim:${benimMesajim}`);
 
     if (benimMesajim) {
       // ── İŞLETMECİ KOMUTLARI ──
