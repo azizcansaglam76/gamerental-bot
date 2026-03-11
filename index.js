@@ -239,10 +239,8 @@ app.post('/webhook', async (req, res) => {
     if (msg.fromMe) {
       if (!benimLid) { benimLid = msg.from; console.log(`📱 Benim LID: ${benimLid}`); }
       const metinFM = (msg.body || '').trim();
-      // # ile başlayan işletmeci komutlarını işle
       if (metinFM.startsWith('#')) {
-        // komut işleme için aşağı devam et — tel olarak kendi numaramı set et
-        // msg.from yerine msg.to (kime yazdıysak) değil, BENIM_NUMARAM kullan
+        // # komutu — işletmeci komutu olarak işle, aşağı devam et
       } else {
         // Normal mesaj — müşteriye yazdıysam botu sustur
         if (msg.to) {
@@ -253,21 +251,18 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // fromMe + # komutu ise tel olarak kendi numaramı kullan
-    const tel = (msg.fromMe && (msg.body||'').trim().startsWith('#'))
-      ? (CONFIG.BENIM_NUMARAM + '@c.us')
-      : msg.from;
+    const tel = msg.fromMe ? (CONFIG.BENIM_NUMARAM + '@c.us') : msg.from;
     if (!tel) return;
     const metin = (msg.body || '').trim().toLowerCase();
     const metinOrijinal = (msg.body || '').trim();
     const medya = medyaVarMi(msg);
 
-    console.log(`📨 ${tel} → "${metin.slice(0,40)}" | medya:${medya} | type:${msg.type}`);
+    console.log(`📨 ${msg.from} → "${metin.slice(0,40)}" | medya:${medya} | type:${msg.type}`);
 
     // ── İŞLETMECİ NUMARASI KONTROLÜ ──
     const benimTelSade = (CONFIG.BENIM_NUMARAM || '').replace(/[^0-9]/g,'');
     const telNumara = tel.replace('@c.us','').replace('@lid','').replace(/[^0-9]/g,'');
-    const benimMesajim = telNumara === benimTelSade || tel === benimLid;
+    const benimMesajim = msg.fromMe || telNumara === benimTelSade || tel === benimLid;
 
     if (benimMesajim) {
       // ── İŞLETMECİ KOMUTLARI ──
@@ -857,8 +852,12 @@ app.post('/webhook', async (req, res) => {
       await mesajGonder(tel, cevap);
     } catch (e) {
       console.error('Claude hatası:', e.message, e.response?.data);
-      await mesajGonder(tel, `Şu an cevap vermekte güçlük çekiyorum, birazdan tekrar dener misiniz? 🙏`);
-      await banaGonder(`⚠️ Bot hatası!\n${musteriAd}: "${metinOrijinal}"\n${e.message}`);
+      // Kredi bitti veya API hatası — menüye yönlendir
+      await mesajGonder(tel,
+        `Merhaba ${musteriAd}! Size yardımcı olmak isterim 😊\n\n` +
+        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş`
+      );
+      await banaGonder(`⚠️ Claude API hatası!\n${musteriAd}: "${metinOrijinal}"\n${e.message}`);
     }
 
   } catch (err) {
