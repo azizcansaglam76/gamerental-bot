@@ -155,6 +155,12 @@ async function mesajGonder(tel, metin) {
       { headers: CONFIG.WAHA_API_KEY ? { 'X-Api-Key': CONFIG.WAHA_API_KEY } : {} }
     );
     console.log(`📤 → ${chatId.slice(0,20)}`);
+    // Benim numaram değilse, bu kişiyi son mesaj gönderilenler listesine ekle
+    const benim9 = (CONFIG.BENIM_NUMARAM || '').replace(/[^0-9]/g,'').slice(-9);
+    const hedef9 = chatId.replace(/[^0-9]/g,'').slice(-9);
+    if (hedef9 !== benim9 && hedef9.length >= 9) {
+      sonMesajGonderilenLid.set(hedef9, chatId);
+    }
   } catch (e) { console.error('Gönderim hatası:', e.message); }
 }
 async function banaGonder(metin) {
@@ -170,6 +176,7 @@ async function banaGonder(metin) {
 const bekleyenOnaylar = new Map();
 const insanDevraldi = new Map(); // tel -> timestamp
 const INSAN_SURESI = 8 * 60 * 60 * 1000; // 8 saat (pratik olarak kalıcı)
+const sonMesajGonderilenLid = new Map(); // numara9 -> lid (botun son mesaj gönderdiği müşteri LID'i)
 let benimLid = process.env.BENIM_LID || null;
 // İlk mesajda otomatik öğren
 
@@ -257,22 +264,29 @@ app.post('/webhook', async (req, res) => {
       if (metinOrijinal.startsWith('#')) {
         // # komutu — aşağıda işle
       } else {
-        // Ben müşteriye yazdım — müşteriyi sustur
-        // msg.to varsa kullan (fromMe true), yoksa msg.from'dan gelen LID benim — hedef bulunamaz
-        // Bu durumda bekleyenOnaylar'da aktif konuşma varsa o key'i sustur
+        // Ben bir müşteriye yazdım — o müşteriyi sustur
+        // Waha fromMe:false gönderdiği için msg.to güvenilir değil
+        // Bunun yerine son bot mesajı gönderilen LID'i sustur (sonMesajGonderilenLid map'inden)
         const hedef = msg.fromMe ? msg.to : null;
+        const susturulanlar = new Set();
         if (hedef) {
-          const hedefSade9 = hedef.replace(/[^0-9]/g,'').slice(-9);
+          const s9 = hedef.replace(/[^0-9]/g,'').slice(-9);
           insanDevraldi.set(hedef, Date.now());
-          insanDevraldi.set(hedefSade9 + '@c.us', Date.now());
-          insanDevraldi.set(hedefSade9 + '@lid', Date.now());
-          console.log(`👤 İşletmeci yazdı (fromMe) → bot susturuldu: ${hedef}`);
-        } else {
-          // Waha fromMe:false gönderiyor — msg.to'ya bakamıyoruz
-          // Bu mesaj bizden geldi ama kime? bekleyenOnaylar'da son aktif key'i sustur
-          // Bu durumu loglayalım
-          console.log(`⚠️ benimMesajim:true ama fromMe:false ve msg.to yok — susturulamadı. msg.to: ${msg.to}`);
+          insanDevraldi.set(s9 + '@c.us', Date.now());
+          insanDevraldi.set(s9 + '@lid', Date.now());
+          susturulanlar.add(hedef);
         }
+        // sonMesajGonderilenLid'den tüm aktif müşterileri sustur
+        for (const [s9, lid] of sonMesajGonderilenLid) {
+          insanDevraldi.set(lid, Date.now());
+          insanDevraldi.set(s9 + '@c.us', Date.now());
+          insanDevraldi.set(s9 + '@lid', Date.now());
+          susturulanlar.add(lid);
+        }
+        if (susturulanlar.size > 0) {
+          console.log(`👤 İşletmeci yazdı → susturuldu: ${[...susturulanlar].join(', ')}`);
+        }
+        sonMesajGonderilenLid.clear(); // temizle — bir sonraki #menu'ye kadar bekleme
         return;
       }
     }
