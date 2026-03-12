@@ -283,10 +283,18 @@ app.post('/webhook', async (req, res) => {
           insanDevraldi.set(s9 + '@lid', Date.now());
           susturulanlar.add(lid);
         }
-        if (susturulanlar.size > 0) {
-          console.log(`👤 İşletmeci yazdı → susturuldu: ${[...susturulanlar].join(', ')}`);
+        // bekleyenOnaylar'daki aktif müşterileri de sustur
+        for (const [k] of bekleyenOnaylar) {
+          const ks9 = k.replace(/[^0-9]/g,'').slice(-9);
+          insanDevraldi.set(k, Date.now());
+          insanDevraldi.set(ks9 + '@c.us', Date.now());
+          insanDevraldi.set(ks9 + '@lid', Date.now());
+          susturulanlar.add(k);
         }
-        sonMesajGonderilenLid.clear(); // temizle — bir sonraki #menu'ye kadar bekleme
+        if (susturulanlar.size > 0) {
+          console.log(`👤 İşletmeci yazdı → susturuldu: ${susturulanlar.size} kişi`);
+        }
+        sonMesajGonderilenLid.clear();
         return;
       }
     }
@@ -314,6 +322,35 @@ app.post('/webhook', async (req, res) => {
           stateTemizle(hedefTel + '@lid');
           await banaGonder(`✅ ${hedefTel} sıfırlandı.`);
         }
+        return;
+      }
+
+      // #s — tüm aktif müşterileri sustur (parametresiz, hızlı komut)
+      if (metin === '#s' || (metin.startsWith('#s ') && !metin.startsWith('#sustur'))) {
+        const kismi = metin === '#s' ? '' : (metinOrijinal.split(' ')[1] || '');
+        let susturulanSayisi = 0;
+        // sonMesajGonderilenLid (bot'un son konuştuğu müşteriler)
+        for (const [s9, lid] of sonMesajGonderilenLid) {
+          if (!kismi || s9.endsWith(kismi.replace(/[^0-9]/g,'')) || lid.includes(kismi)) {
+            insanDevraldi.set(lid, Date.now());
+            insanDevraldi.set(s9 + '@c.us', Date.now());
+            insanDevraldi.set(s9 + '@lid', Date.now());
+            susturulanSayisi++;
+          }
+        }
+        sonMesajGonderilenLid.clear();
+        // bekleyenOnaylar (ödeme/işlem bekleyenler)
+        for (const [k] of bekleyenOnaylar) {
+          const ks9 = k.replace(/[^0-9]/g,'').slice(-9);
+          if (!kismi || ks9.endsWith(kismi.replace(/[^0-9]/g,''))) {
+            insanDevraldi.set(k, Date.now());
+            insanDevraldi.set(ks9 + '@c.us', Date.now());
+            insanDevraldi.set(ks9 + '@lid', Date.now());
+            susturulanSayisi++;
+          }
+        }
+        await banaGonder(`🤫 ${susturulanSayisi} müşteri susturuldu.
+Açmak için: #ac [numara] veya #menu [numara]`);
         return;
       }
 
@@ -641,7 +678,8 @@ app.post('/webhook', async (req, res) => {
           );
         } else {
           await mesajGonder(tel, `Sistemde kayıtlı bulunamadınız. Kayıt için işletmecimize ulaşın 🎮`);
-          await banaGonder(`📵 *Yeni Müşteri*\n\nNumara: ${numara}\nWhatsApp: ${tel}`);
+          const yeniLidKisa = tel.replace(/[^0-9]/g,"").slice(-10);
+          await banaGonder(`📵 *Yeni Müşteri*\n\nNumara: ${numara}\nWhatsApp: ${tel}\n\n💬 Susturmak için: #sustur ${yeniLidKisa}\n🤖 Menü için: #menu ${numara}`);
         }
       } else {
         await mesajGonder(tel, `Lütfen geçerli telefon numaranızı yazın (örn: 5301234567) 📱`);
@@ -1016,7 +1054,8 @@ app.post('/webhook', async (req, res) => {
         `Mesajınız alındı, yetkili en kısa sürede sizinle ilgilenecek 🙏\n\n` +
         `Lütfen bekleyin, bağlanıyor...`
       );
-      await banaGonder(`🔔 *Yetkili Talebi*\n\n👤 ${musteriAd}\n📞 ${tel}\n💬 "${metinOrijinal}"\n\nMüşteri seninle görüşmek istiyor!`);
+      const ytkLidKisa = tel.replace(/[^0-9]/g,"").slice(-10);
+      await banaGonder(`🔔 *Yetkili Talebi*\n\n👤 ${musteriAd}\n📞 ${tel}\n💬 "${metinOrijinal}"\n\n✅ Bot susturuldu.\n➡️ Açmak için: #ac ${ytkLidKisa}`);
       const telSadeYetkili = tel.replace(/[^0-9]/g,'');
       insanDevraldi.set(tel, Date.now());
       insanDevraldi.set(telSadeYetkili + '@c.us', Date.now());
