@@ -306,11 +306,19 @@ app.post('/webhook', async (req, res) => {
         const hedef = metinOrijinal.split(' ')[1];
         if (hedef) {
           const sade = hedef.replace(/[^0-9]/g,'');
+          const sade9 = sade.slice(-9);
           const silinecekler = [];
           for (const [k] of insanDevraldi) {
-            if (k.includes(sade)) silinecekler.push(k);
+            if (k.replace(/[^0-9]/g,'').includes(sade9)) silinecekler.push(k);
           }
           silinecekler.forEach(k => insanDevraldi.delete(k));
+          stateTemizle(sade + '@c.us');
+          stateTemizle(sade + '@lid');
+          try {
+            const veriAc = await getVeri();
+            const mAc = veriAc.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(sade9) || (m.whatsappLid||'').includes(sade9));
+            if (mAc && mAc.whatsappLid) insanDevraldi.delete(mAc.whatsappLid);
+          } catch(e) {}
           await banaGonder(`🤖 Bot aktif edildi: ${hedef}`);
         } else {
           await banaGonder('Kullanim: #ac 905xxxxxxxxx');
@@ -948,7 +956,11 @@ app.post('/webhook', async (req, res) => {
         `Lütfen bekleyin, bağlanıyor...`
       );
       await banaGonder(`🔔 *Yetkili Talebi*\n\n👤 ${musteriAd}\n📞 ${tel}\n💬 "${metinOrijinal}"\n\nMüşteri seninle görüşmek istiyor!`);
+      const telSadeYetkili = tel.replace(/[^0-9]/g,'');
       insanDevraldi.set(tel, Date.now());
+      insanDevraldi.set(telSadeYetkili + '@c.us', Date.now());
+      insanDevraldi.set(telSadeYetkili + '@lid', Date.now());
+      await banaGonder('\u2705 Bot susturuldu. A\u00e7mak i\u00e7in: #ac ' + telSadeYetkili);
       return;
     }
 
