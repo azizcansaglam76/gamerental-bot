@@ -203,12 +203,17 @@ app.post('/webhook', async (req, res) => {
     const msg = event.payload;
     if (!msg) return;
 
-    // Giden mesaj (fromMe) — sadece susturma için işle
-    if (event.event === 'message.any' && msg.fromMe && msg.to) {
+    // Giden mesaj (fromMe) — message.any VEYA message event'inden yakala
+    const fromMeEvent = (event.event === 'message.any' || event.event === 'message') && msg.fromMe && msg.to;
+    if (fromMeEvent) {
       const body = (msg.body || '').trim();
+      console.log(`📤 fromMe event: ${event.event} | to: ${msg.to} | body: "${body.slice(0,30)}"`);
       if (!body.startsWith('#')) {
+        const sade9 = msg.to.replace(/[^0-9]/g,'').slice(-9);
         insanDevraldi.set(msg.to, Date.now());
-        console.log(`👤 Giden mesaj → susturuldu: ${msg.to}`);
+        insanDevraldi.set(sade9 + '@c.us' , Date.now());
+        insanDevraldi.set(sade9 + '@lid', Date.now());
+        console.log(`👤 Giden mesaj → susturuldu: ${msg.to} | sade9: ${sade9}`);
       }
       return;
     }
@@ -253,11 +258,20 @@ app.post('/webhook', async (req, res) => {
         // # komutu — aşağıda işle
       } else {
         // Ben müşteriye yazdım — müşteriyi sustur
-        // msg.to veya msg.from içinden müşteri telini bul
-        const hedef = msg.fromMe ? msg.to : (tel !== benimLid ? tel : null);
+        // msg.to varsa kullan (fromMe true), yoksa msg.from'dan gelen LID benim — hedef bulunamaz
+        // Bu durumda bekleyenOnaylar'da aktif konuşma varsa o key'i sustur
+        const hedef = msg.fromMe ? msg.to : null;
         if (hedef) {
+          const hedefSade9 = hedef.replace(/[^0-9]/g,'').slice(-9);
           insanDevraldi.set(hedef, Date.now());
-          console.log(`👤 İşletmeci yazdı → bot susturuldu: ${hedef}`);
+          insanDevraldi.set(hedefSade9 + '@c.us', Date.now());
+          insanDevraldi.set(hedefSade9 + '@lid', Date.now());
+          console.log(`👤 İşletmeci yazdı (fromMe) → bot susturuldu: ${hedef}`);
+        } else {
+          // Waha fromMe:false gönderiyor — msg.to'ya bakamıyoruz
+          // Bu mesaj bizden geldi ama kime? bekleyenOnaylar'da son aktif key'i sustur
+          // Bu durumu loglayalım
+          console.log(`⚠️ benimMesajim:true ama fromMe:false ve msg.to yok — susturulamadı. msg.to: ${msg.to}`);
         }
         return;
       }
@@ -296,11 +310,26 @@ app.post('/webhook', async (req, res) => {
           const sade = hedef.replace(/[^0-9]/g,'');
           insanDevraldi.set(sade + '@c.us', Date.now());
           insanDevraldi.set(sade + '@lid', Date.now());
+          // Firebase whatsappLid ile de sustur
           try {
             const veriS = await getVeri();
-            const mS = veriS.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(sade) || (m.whatsappLid||'').includes(sade));
-            if (mS && mS.whatsappLid) insanDevraldi.set(mS.whatsappLid, Date.now());
+            const mS = veriS.musteriler.find(m =>
+              (m.tel||'').replace(/[^0-9]/g,'').endsWith(sade.slice(-9)) ||
+              (m.whatsappLid||'').replace(/[^0-9]/g,'').includes(sade.slice(-9))
+            );
+            if (mS && mS.whatsappLid) {
+              insanDevraldi.set(mS.whatsappLid, Date.now());
+              console.log(`🤫 whatsappLid ile de susturuldu: ${mS.whatsappLid}`);
+            }
           } catch(e) {}
+          // bekleyenOnaylar'da bu müşteriyle eşleşen LID key'lerini de sustur
+          for (const [k, v] of bekleyenOnaylar) {
+            const kSade = k.replace(/[^0-9]/g,'');
+            if (kSade.endsWith(sade.slice(-9))) {
+              insanDevraldi.set(k, Date.now());
+              console.log(`🤫 bekleyen key ile susturuldu: ${k}`);
+            }
+          }
           await banaGonder(`🤫 Bot susturuldu: ${hedef}\n\nGeri açmak için: #ac ${hedef}`);
         } else {
           await banaGonder('Kullanim: #sustur 905xxxxxxxxx');
@@ -526,9 +555,20 @@ app.post('/webhook', async (req, res) => {
 
     // ── İNSAN DEVRALMA KONTROLÜ ──
     const telSade = tel.replace(/[^0-9]/g,'');
-    const devralZamani = insanDevraldi.get(tel)
+    const telSade9 = telSade.slice(-9);
+    // Tüm formatlarda ara — key ne formatta kaydolduysa bulsun
+    let devralZamani = insanDevraldi.get(tel)
       || insanDevraldi.get(telSade + '@c.us')
       || insanDevraldi.get(telSade + '@lid');
+    // Bulunamazsa son 9 hane ile tüm key'leri tara
+    if (!devralZamani) {
+      for (const [k, v] of insanDevraldi) {
+        if (k.replace(/[^0-9]/g,'').endsWith(telSade9)) {
+          devralZamani = v;
+          break;
+        }
+      }
+    }
     if (devralZamani && Date.now() - devralZamani < INSAN_SURESI) {
       console.log(`🤫 Susturuldu: ${tel}`);
       return;
