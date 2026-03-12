@@ -937,6 +937,13 @@ async function rezervSiraKontrol() {
     const o = veri.oyunlar.find(x => x.id === oyunId);
     if (!o) continue;
 
+
+    // Oyun henüz çıkmadıysa bildirim atma
+    if (o.cikis && o.cikis > now) {
+      console.log(`⏳ ${o.ad} henüz çıkmadı (${o.cikis}), rezerv bildirimi atlandı`);
+      continue;
+    }
+
     // Slot müsait mi?
     const aktifSayisi = veri.kiralamalar.filter(k => k.oyunId === oyunId && k.tip === tip && k.durum === 'aktif').length;
     const maxSlot = tip === 'primary' ? (o.ciftPrimary ? 2 : 1) : 1;
@@ -981,7 +988,6 @@ async function rezervSiraKontrol() {
 // Gecikme kontrolü: Firebase'e tarih yazar, aynı gün tekrar atmaz
 let _ilkBaslangic = Date.now();
 setInterval(async () => {
-  // Restart'tan sonra 60 dakika geçmediyse hiç çalışma
   if (Date.now() - _ilkBaslangic < 60 * 60 * 1000) {
     console.log('⏳ Zamanlayıcı bekleme modunda (restart sonrası)');
     return;
@@ -989,7 +995,9 @@ setInterval(async () => {
   const saat = new Date().getHours();
   if (saat === 15) await yarinBitenKontrol();
   await gecikmeKontrol();
-  await rezervSiraKontrol();
+  // Rezerv bildirimi sadece 09:00-21:00 arası çalışsın
+  if (saat >= 9 && saat < 21) await rezervSiraKontrol();
+  else console.log(`🌙 Rezerv kontrol atlandı (saat ${saat}:xx)`);
 }, 60 * 60 * 1000);
 
 // ── TOPLU DUYURU API ──
