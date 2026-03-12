@@ -261,7 +261,7 @@ app.post('/webhook', async (req, res) => {
     if (benimMesajim) {
       // ── İŞLETMECİ KOMUTLARI ──
 
-      // #reset — tüm state temizle
+// #reset — tüm state temizle
       if (metin === '#reset') {
         bekleyenOnaylar.clear();
         insanDevraldi.clear();
@@ -282,27 +282,115 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // #devral 905xxx — botu sustur
-      if (metin.startsWith('#devral')) {
+      // #sustur 905xxx veya #devral 905xxx — botu sustur
+      if (metin.startsWith('#sustur') || metin.startsWith('#devral')) {
         const hedef = metinOrijinal.split(' ')[1];
         if (hedef) {
           const sade = hedef.replace(/[^0-9]/g,'');
           insanDevraldi.set(sade + '@c.us', Date.now());
           insanDevraldi.set(sade + '@lid', Date.now());
-          await banaGonder(`👤 Bot susturuldu: ${hedef} (30 dk)`);
+          try {
+            const veriS = await getVeri();
+            const mS = veriS.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(sade) || (m.whatsappLid||'').includes(sade));
+            if (mS && mS.whatsappLid) insanDevraldi.set(mS.whatsappLid, Date.now());
+          } catch(e) {}
+          await banaGonder(`🤫 Bot susturuldu: ${hedef}\n\nGeri açmak için: #ac ${hedef}`);
+        } else {
+          await banaGonder('Kullanim: #sustur 905xxxxxxxxx');
         }
         return;
       }
 
-      // #bota 905xxx — botu geri aç
-      if (metin.startsWith('#bota')) {
+      // #ac 905xxx veya #bota 905xxx — botu geri ac
+      if (metin.startsWith('#ac') || metin.startsWith('#bota')) {
         const hedef = metinOrijinal.split(' ')[1];
         if (hedef) {
           const sade = hedef.replace(/[^0-9]/g,'');
-          insanDevraldi.delete(sade + '@c.us');
-          insanDevraldi.delete(sade + '@lid');
-          await banaGonder(`🤖 Bot aktif: ${hedef}`);
+          const silinecekler = [];
+          for (const [k] of insanDevraldi) {
+            if (k.includes(sade)) silinecekler.push(k);
+          }
+          silinecekler.forEach(k => insanDevraldi.delete(k));
+          await banaGonder(`🤖 Bot aktif edildi: ${hedef}`);
+        } else {
+          await banaGonder('Kullanim: #ac 905xxxxxxxxx');
         }
+        return;
+      }
+
+      // #menu 905xxx — musteriye menu gonder (botu da acar)
+      if (metin.startsWith('#menu')) {
+        const hedef = metinOrijinal.split(' ')[1];
+        if (hedef) {
+          const sade = hedef.replace(/[^0-9]/g,'');
+          const silinecekler2 = [];
+          for (const [k] of insanDevraldi) {
+            if (k.includes(sade)) silinecekler2.push(k);
+          }
+          silinecekler2.forEach(k => insanDevraldi.delete(k));
+          try {
+            const veriM = await getVeri();
+            const mM = veriM.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(sade) || (m.whatsappLid||'').includes(sade));
+            const adM = mM ? ((mM.ad || mM.soyad || '').trim() || 'Merhaba') : 'Merhaba';
+            const hedefKey = (mM && mM.whatsappLid) ? mM.whatsappLid : (sade + '@c.us');
+            stateTemizle(hedefKey);
+            await mesajGonder(hedefKey,
+              `👋 Merhaba *${adM}*! 🎮\n\n*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş`
+            );
+            await banaGonder(`📋 Menü gönderildi: ${hedef}`);
+          } catch(e) {
+            await banaGonder(`❌ Hata: ${e.message}`);
+          }
+        } else {
+          await banaGonder('Kullanim: #menu 905xxxxxxxxx');
+        }
+        return;
+      }
+
+      // #mesaj 905xxx Metin buraya — musteriye ozel mesaj gonder (botu susturur)
+      if (metin.startsWith('#mesaj')) {
+        const parcalar = metinOrijinal.split(' ');
+        const hedef = parcalar[1];
+        const mesajMetni = parcalar.slice(2).join(' ');
+        if (hedef && mesajMetni) {
+          const sade = hedef.replace(/[^0-9]/g,'');
+          insanDevraldi.set(sade + '@c.us', Date.now());
+          insanDevraldi.set(sade + '@lid', Date.now());
+          try {
+            const veriMes = await getVeri();
+            const mMes = veriMes.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(sade) || (m.whatsappLid||'').includes(sade));
+            const hedefKeyMes = (mMes && mMes.whatsappLid) ? mMes.whatsappLid : (sade + '@c.us');
+            await mesajGonder(hedefKeyMes, mesajMetni);
+            await banaGonder(`✅ Mesaj gönderildi → ${hedef}\n(Bot susturuldu, açmak için: #ac ${hedef})`);
+          } catch(e) {
+            await banaGonder(`❌ Hata: ${e.message}`);
+          }
+        } else {
+          await banaGonder('Kullanim: #mesaj 905xxxxxxxxx Mesaj metni buraya');
+        }
+        return;
+      }
+
+      // #durum — bot durumu ozeti
+      if (metin === '#durum') {
+        const susturulanSayisi = insanDevraldi.size;
+        const bekleyenSayisi = bekleyenOnaylar.size;
+        const susturListesi = [...insanDevraldi.keys()].slice(0,8).join('\n') || '-';
+        await banaGonder(
+          `📊 *Bot Durumu*\n\n` +
+          `🤫 Susturulan: ${susturulanSayisi} kişi\n` +
+          `⏳ Ödeme bekleyen: ${bekleyenSayisi} kişi\n` +
+          `🆔 Benim LID: ${benimLid || 'henüz tespit edilmedi'}\n\n` +
+          `📋 *Komutlar:*\n` +
+          `#sustur 905xxx — botu sustur\n` +
+          `#ac 905xxx — botu aç\n` +
+          `#menu 905xxx — menü gönder\n` +
+          `#mesaj 905xxx Metin — mesaj gönder\n` +
+          `#onayla 905xxx — ödeme onayla\n` +
+          `#resetmusteri 905xxx — state sıfırla\n` +
+          `#reset — tümünü sıfırla\n\n` +
+          `Susturulanlar:\n${susturListesi}`
+        );
         return;
       }
 
