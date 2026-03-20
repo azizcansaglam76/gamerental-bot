@@ -1092,6 +1092,29 @@ async function yarinBitenKontrol() {
   }
 }
 
+async function bugunBitenKontrol() {
+  const veri = await getVeri(); if (!veri) return;
+  const bugunTarih = bugun();
+  for (const k of veri.kiralamalar.filter(k => k.durum === 'aktif' && k.bit === bugunTarih)) {
+    const m = veri.musteriler.find(x => x.id === k.musteriId);
+    const o = veri.oyunlar.find(x => x.id === k.oyunId);
+    if (!m) continue;
+    const hedef = m.whatsappLid || (m.tel ? temizTel(m.tel) + '@c.us' : null);
+    if (!hedef) continue;
+    const gf = gunlukFiyat(o, k.tip);
+    await mesajGonder(hedef,
+      `⏰ *Süre Bugün Bitiyor!*\n\n` +
+      `Merhaba! *${o?.ad}* oyununuzun kiralama süresi *bugün* sona eriyor.\n\n` +
+      `Güven puanınızda sorun yaşamamak için lütfen:\n\n` +
+      `📦 *İade etmek için* → *3* yazın\n` +
+      `🔄 *Uzatmak için* → *2* yazın\n\n` +
+      `Teşekkürler! 🎮`
+    );
+    // Direkt uzatma state'ine alma — müşteri seçsin
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
+
 async function gecikmeKontrol() {
   const veri = await getVeri(); if (!veri) return;
   const now = bugun();
@@ -1194,6 +1217,7 @@ setInterval(async () => {
   }
   const saat = new Date().getHours();
   if (saat === 15) await yarinBitenKontrol();
+  if (saat === 15) await bugunBitenKontrol();
   await gecikmeKontrol();
   // Rezerv bildirimi sadece 09:00-21:00 arası çalışsın
   if (saat >= 9 && saat < 21) await rezervSiraKontrol();
