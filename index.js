@@ -927,6 +927,38 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       }
 
       // İade — onay bekleniyor
+      // Tavsiye seçimi — iade sonrası
+      if (bekleyen.tip === 'tavsiye_secim') {
+        const { oneriler } = bekleyen;
+        const sayi = parseInt(metin);
+        let secilen = null;
+        if (!isNaN(sayi) && sayi >= 1 && sayi <= oneriler.length) {
+          secilen = oneriler[sayi - 1];
+        } else if (metin === 'menü' || metin === 'menu' || metin === 'iptal') {
+          bekleyenOnaylar.delete(tel);
+          await mesajGonder(tel,
+            `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
+          );
+          return;
+        }
+        if (!secilen) {
+          await mesajGonder(tel, `Listeden bir numara yaz (1-${oneriler.length}), veya *menü* yaz.`);
+          return;
+        }
+        // Seçilen oyunu kiralama akışına aktar
+        const priDolu = veri.kiralamalar.filter(k => k.oyunId === secilen.id && k.tip === 'primary' && k.durum === 'aktif').length >= (secilen.ciftPrimary ? 2 : 1);
+        const secDolu = veri.kiralamalar.filter(k => k.oyunId === secilen.id && k.tip === 'secondary' && k.durum === 'aktif').length >= 1;
+        const pri = gunlukFiyat(secilen, 'primary');
+        const sec = gunlukFiyat(secilen, 'secondary');
+        await mesajGonder(tel,
+          `🎮 *${secilen.ad}* (${secilen.platform})\n\nHangi tip kiralamak istiyorsunuz?\n\n` +
+          `*1* - 🔵 Primary (${fmt(pri)}/gün)${priDolu ? ' — Dolu, sıraya girebilirsin' : ''}\n` +
+          `*2* - 🟣 Secondary (${fmt(sec)}/gün)${secDolu ? ' — Dolu, sıraya girebilirsin' : ''}`
+        );
+        bekleyenOnaylar.set(tel, { tip: 'kiralama_tip_bekle', musteriId: bekleyen.musteriId, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad, priDolu, secDolu });
+        return;
+      }
+
       if (bekleyen.tip === 'iade_onay') {
         if (metin === 'evet') {
           if (aktifKira) {
@@ -935,6 +967,66 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             const oyun = veri.oyunlar.find(o => o.id === aktifKira.oyunId);
             await mesajGonder(tel, `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮`);
             await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n\n⚠️ Hesabı geri almayı unutma!`);
+
+            // Tavsiye sistemi — müşterinin geçmiş kiralamaları dışındaki müsait oyunları öner
+            try {
+              await new Promise(r => setTimeout(r, 2000)); // 2 sn bekle
+              const kiraliOyunIds = new Set(veri.kiralamalar.filter(k => k.musteriId === musteri.id).map(k => k.oyunId));
+              // Collaborative filtering — aynı oyunları kiralayan müşterilerin tercihlerini baz al
+              const benzerlik = new Map();
+              veri.kiralamalar.forEach(k => {
+                if (k.musteriId === musteri.id) return;
+                if (kiraliOyunIds.has(k.oyunId)) benzerlik.set(k.musteriId, (benzerlik.get(k.musteriId)||0)+1);
+              });
+              const colSkor = new Map();
+              veri.kiralamalar.forEach(k => {
+                if (k.musteriId === musteri.id || kiraliOyunIds.has(k.oyunId)) return;
+                const b = benzerlik.get(k.musteriId)||0;
+                if (b > 0) colSkor.set(k.oyunId, (colSkor.get(k.oyunId)||0)+b);
+              });
+              const popSkor = new Map();
+              veri.kiralamalar.forEach(k => {
+                if (!kiraliOyunIds.has(k.oyunId)) {
+                  if (!popSkor.has(k.oyunId)) popSkor.set(k.oyunId, new Set());
+                  popSkor.get(k.oyunId).add(k.musteriId);
+                }
+              });
+              const musaitOneriler = veri.oyunlar.filter(o =>
+                !o.deaktif &&
+                (!o.cikis || o.cikis <= bugun()) &&
+                o.id !== aktifKira.oyunId &&
+                !kiraliOyunIds.has(o.id)
+              ).map(o => ({
+                oyun: o,
+                skor: (colSkor.get(o.id)||0)*3 + (popSkor.has(o.id)?popSkor.get(o.id).size:0)
+              }))
+              .filter(s => s.skor > 0)
+              .sort((a, b) => b.skor - a.skor)
+              .slice(0, 3)
+              .map(s => s.oyun);
+
+              // Skor yoksa popülerliğe göre fallback
+              const oneriler = musaitOneriler.length > 0 ? musaitOneriler :
+                veri.oyunlar.filter(o => !o.deaktif && (!o.cikis||o.cikis<=bugun()) && o.id !== aktifKira.oyunId && !kiraliOyunIds.has(o.id))
+                  .sort((a,b) => (b.kiralamaSayisi||0)-(a.kiralamaSayisi||0)).slice(0,3);
+
+              if (oneriler.length > 0) {
+                let tavsiyeMesaj = `🎮 *Sana Özel Öneriler*\n\n`;
+                tavsiyeMesaj += `*${oyun?.ad}* oyununu bitirdin, teşekkürler! 🙏\n\nBeğenebileceğini düşündüğümüz oyunlar:\n\n`;
+                oneriler.forEach((o, i) => {
+                  const aktifler = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif');
+                  const priMusait = aktifler.filter(k => k.tip==='primary').length < (o.ciftPrimary ? 2 : 1);
+                  const secMusait = aktifler.filter(k => k.tip==='secondary').length < 1;
+                  const durum = (priMusait || secMusait) ? '✅ Müsait' : '⏳ Sıraya girebilirsin';
+                  const pri = gunlukFiyat(o, 'primary');
+                  const sec = gunlukFiyat(o, 'secondary');
+                  tavsiyeMesaj += `*${i+1}* - 🎮 ${o.ad} (${o.platform})\n   ${durum} | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün\n\n`;
+                });
+                tavsiyeMesaj += `Hemen kiralamak için numara yaz 👆\nVeya *menü* yaz 😊`;
+                await mesajGonder(tel, tavsiyeMesaj);
+                bekleyenOnaylar.set(tel, { tip: 'tavsiye_secim', musteriId: musteri.id, musteriAd, oneriler });
+              }
+            } catch(e) { console.error('Tavsiye hatası:', e.message); }
           }
         } else if (metin === 'hayır' || metin === 'hayir' || metin === 'iptal') {
           bekleyenOnaylar.delete(tel);
