@@ -797,7 +797,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const tipLabel = kiraTip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
         const o = veri2.oyunlar.find(x => x.id === bekleyen.oyunId);
         await mesajGonder(tel,
-          `✅ *${bekleyen.oyunAd}* için ön rezervasyonunuz alındı!\n\n${tipLabel}\n📅 Oyun çıkış tarihi: ${fmtTarih(o?.cikis||'')}\n📍 Sıra numaranız: ${siradakiSayi + 1}\n\nOyun çıktığında ve sıranız geldiğinde otomatik bildirim gönderilir 🔔`
+          `✅ *${bekleyen.oyunAd}* için ön rezervasyonunuz alındı!\n\n${tipLabel}\n📅 Oyun çıkış tarihi: ${fmtTarih(o?.cikis||'')}\n\nOyun çıktığında sıranız gelince otomatik bildirim gönderilir 🔔`
         );
         await banaGonder(`🗓 *Ön Rezervasyon (Bot)*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd} (${tipLabel})\n📅 Çıkış: ${o?.cikis||'?'}\n📍 Sıra: ${siradakiSayi + 1}`);
         return;
@@ -830,7 +830,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         bekleyenOnaylar.delete(tel);
         const tipLabel = kiraTip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
         await mesajGonder(tel,
-          `✅ *${bekleyen.oyunAd}* için sıraya girdiniz!\n\n${tipLabel}\n📍 Sıra numaranız: ${siradakiSayi + 1}\n\nSlot açılınca size otomatik bildirim gönderilir 🔔`
+          `✅ *${bekleyen.oyunAd}* için sıraya girdiniz!\n\n${tipLabel}\n\nSlot açılınca size otomatik bildirim gönderilir 🔔`
         );
         await banaGonder(`🔔 *Yeni Rezervasyon (Bot)*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd} (${tipLabel})\n📍 Sıra: ${siradakiSayi + 1}`);
         return;
