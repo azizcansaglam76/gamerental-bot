@@ -561,6 +561,13 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           });
           if (!veri2.nextId) veri2.nextId = {};
           veri2.nextId.k = yeniId;
+          // Oyun istatistiklerini güncelle
+          const oyunStat = veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId);
+          if (oyunStat) {
+            oyunStat.kiralamaSayisi = (oyunStat.kiralamaSayisi || 0) + 1;
+            oyunStat.toplamGelir = (oyunStat.toplamGelir || 0) + hedefBekleyen.ucret;
+            oyunStat.durum = 'kirada';
+          }
           await setVeri(veri2);
           bekleyenOnaylar.delete(hedefKey);
           // Tier kontrolü — SONRA
@@ -589,6 +596,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             k.bit = tarihEkle(k.bit, hedefBekleyen.gun);
             k.ucret = (k.ucret||0) + hedefBekleyen.ucret;
             k.net = (k.net||0) + hedefBekleyen.ucret;
+            // Oyun toplamGelir güncelle
+            const oyunStatUzat = veri2.oyunlar.find(o => o.id === k.oyunId);
+            if (oyunStatUzat) {
+              oyunStatUzat.toplamGelir = (oyunStatUzat.toplamGelir || 0) + hedefBekleyen.ucret;
+            }
             await setVeri(veri2);
             bekleyenOnaylar.delete(hedefKey);
             const tierSonrasi = getMusteriTierBot(k.musteriId, veri2);
@@ -882,10 +894,12 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const gun = parseInt(metin);
         if (isNaN(gun) || gun < 5) { await mesajGonder(tel, `Minimum 5 gün. Kaç gün?`); return; }
         const bas = bugun();
-        // Hediye gün hesapla: 10+ günde yeni çıkmış değilse +5
+        // Hediye gün hesapla: 10+ günde yeni çıkmış değilse +5, Platin ise yeni oyunda da +5
         const oyunHediye = veri.oyunlar.find(o => o.id === bekleyen.oyunId);
         const yeniOyun = oyunHediye?.yeniOyun || false;
-        const hediye = (!yeniOyun && gun >= 10) ? 5 : 0;
+        const tierHediye = getMusteriTierBot(musteri.id, veri);
+        const platinMi = tierHediye.seviye === 'platin';
+        const hediye = ((!yeniOyun || platinMi) && gun >= 10) ? 5 : 0;
         const toplamGun = gun + hediye;
         const bit = tarihEkle(bas, toplamGun);
         // Tier indirimini hesapla
@@ -895,7 +909,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const indirimTL = Math.round(hamUcret * indirimOrani / 100);
         const ucret = hamUcret - indirimTL;
         let ozet = `📋 *Kiralama Özeti*\n\n🎮 *${bekleyen.oyunAd}*\n🎯 ${bekleyen.kiraTip}\n📅 ${gun} gün`;
-        if (hediye > 0) ozet += ` *+${hediye} gün hediye 🎁*`;
+        if (hediye > 0) ozet += platinMi && yeniOyun ? ` *+${hediye} gün hediye 🎁 (💎 Platin ayrıcalığı)*` : ` *+${hediye} gün hediye 🎁*`;
         ozet += ` (${bas} → ${bit})\n`;
         if (indirimOrani > 0) {
           ozet += `💰 Normal fiyat: ${fmt(hamUcret)}\n`;
@@ -1009,8 +1023,17 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             aktifKira.durum = 'teslim';
             await setVeri(veri);
             const oyun = veri.oyunlar.find(o => o.id === aktifKira.oyunId);
-            await mesajGonder(tel, `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮`);
-            await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n\n⚠️ Hesabı geri almayı unutma!`);
+            // Tipe göre hesap silme hatırlatması
+            let iadeMesaj = `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮\n\n`;
+            if (aktifKira.tip === 'primary') {
+              iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen konsolunuzdan şu adımları uygulayın:\n\n`;
+              iadeMesaj += `*Ayarlar → Kullanıcılar ve Hesaplar → Diğer → Çevrimdışı Oynama → Devre Dışı Bırak*\n\n`;
+              iadeMesaj += `Bu adımı tamamladıktan sonra hesabı konsolunuzdan silebilirsiniz 🙏`;
+            } else {
+              iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen hesabı konsolunuzdan silmeyi unutmayın 🙏`;
+            }
+            await mesajGonder(tel, iadeMesaj);
+            await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n🎯 ${aktifKira.tip}\n\n⚠️ Hesabı geri almayı unutma!`);
 
             // Tavsiye sistemi — müşterinin geçmiş kiralamaları dışındaki müsait oyunları öner
             try {
