@@ -1019,12 +1019,23 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
       if (bekleyen.tip === 'iade_onay') {
         if (metin === 'evet') {
-          if (aktifKira) {
-            aktifKira.durum = 'teslim';
+          // bekleyen.kiraId ile doğru kiralamanın bulunması
+          const iadeKira = bekleyen.kiraId
+            ? veri.kiralamalar.find(k => k.id === bekleyen.kiraId)
+            : aktifKira;
+          if (iadeKira) {
+            iadeKira.durum = 'teslim';
+            // Oyun durumunu güncelle
+            const oyunIade = veri.oyunlar.find(o => o.id === iadeKira.oyunId);
+            if (oyunIade) {
+              const halaKirada = veri.kiralamalar.some(k => k.id !== iadeKira.id && k.oyunId === iadeKira.oyunId && k.durum === 'aktif');
+              if (!halaKirada) oyunIade.durum = 'mevcut';
+            }
             await setVeri(veri);
+            const aktifKira = iadeKira;
             const oyun = veri.oyunlar.find(o => o.id === aktifKira.oyunId);
             // Tipe göre hesap silme hatırlatması
-            let iadeMesaj = `*${oyun?.ad}* için ✅ İade bildiriminiz alındı!  Teşekkürler 🎮\n\n`;
+            let iadeMesaj = `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮\n\n`;
             if (aktifKira.tip === 'primary') {
               iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen konsolunuzdan şu adımları uygulayın:\n\n`;
               iadeMesaj += `*Ayarlar → Kullanıcılar ve Hesaplar → Diğer → Çevrimdışı Oynama → Devre Dışı Bırak*\n\n`;
