@@ -534,7 +534,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           veri2.kiralamalar.push({
             id: yeniId, oyunId: hedefBekleyen.oyunId, musteriId: hedefBekleyen.musteriId,
             tip: hedefBekleyen.kiraTip, bas, bit,
-            ucret: hedefBekleyen.ucret, indirim: 0, net: hedefBekleyen.ucret,
+            ucret: (hedefBekleyen.ucret + (hedefBekleyen.indirim||0)), indirim: (hedefBekleyen.indirim||0), net: hedefBekleyen.ucret,
             onOdeme: hedefBekleyen.ucret, hediyeGun, notlar: 'Bot ile eklendi', durum: 'aktif',
           });
           if (!veri2.nextId) veri2.nextId = {};
@@ -859,7 +859,6 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       if (bekleyen.tip === 'kiralama_gun_bekle') {
         const gun = parseInt(metin);
         if (isNaN(gun) || gun < 5) { await mesajGonder(tel, `Minimum 5 gün. Kaç gün?`); return; }
-        const ucret = bekleyen.gunluk * gun;
         const bas = bugun();
         // Hediye gün hesapla: 10+ günde yeni çıkmış değilse +5
         const oyunHediye = veri.oyunlar.find(o => o.id === bekleyen.oyunId);
@@ -867,12 +866,25 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const hediye = (!yeniOyun && gun >= 10) ? 5 : 0;
         const toplamGun = gun + hediye;
         const bit = tarihEkle(bas, toplamGun);
+        // Tier indirimini hesapla
+        const tierMusteri = getMusteriTierBot(musteri.id, veri);
+        const hamUcret = bekleyen.gunluk * gun;
+        const indirimOrani = tierMusteri.indirim || 0;
+        const indirimTL = Math.round(hamUcret * indirimOrani / 100);
+        const ucret = hamUcret - indirimTL;
         let ozet = `📋 *Kiralama Özeti*\n\n🎮 *${bekleyen.oyunAd}*\n🎯 ${bekleyen.kiraTip}\n📅 ${gun} gün`;
         if (hediye > 0) ozet += ` *+${hediye} gün hediye 🎁*`;
-        ozet += ` (${bas} → ${bit})\n💰 Toplam: *${fmt(ucret)}*\n\n`;
+        ozet += ` (${bas} → ${bit})\n`;
+        if (indirimOrani > 0) {
+          ozet += `💰 Normal fiyat: ${fmt(hamUcret)}\n`;
+          ozet += `${tierMusteri.emoji} *${tierMusteri.label} indirimi %${indirimOrani}: -${fmt(indirimTL)}*\n`;
+          ozet += `✅ Ödenecek tutar: *${fmt(ucret)}*\n\n`;
+        } else {
+          ozet += `💰 Toplam: *${fmt(ucret)}*\n\n`;
+        }
         ozet += `*Ödeme Bilgileri:*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\nÖdemeyi yaptıktan sonra dekontu buraya gönderin 📎`;
         await mesajGonder(tel, ozet);
-        bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont', gun, hediye, toplamGun, ucret, bas, bit });
+        bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont', gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit });
         return;
       }
 
