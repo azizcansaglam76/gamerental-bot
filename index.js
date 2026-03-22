@@ -1035,7 +1035,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             const aktifKira = iadeKira;
             const oyun = veri.oyunlar.find(o => o.id === aktifKira.oyunId);
             // Tipe göre hesap silme hatırlatması
-            let iadeMesaj = `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮\n\n`;
+            let iadeMesaj = `*${oyun?.ad}* için İade bildiriminiz alındı!✅  Teşekkürler 🎮\n\n`;
             if (aktifKira.tip === 'primary') {
               iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen konsolunuzdan şu adımları uygulayın:\n\n`;
               iadeMesaj += `*Ayarlar → Kullanıcılar ve Hesaplar → Diğer → Çevrimdışı Oynama → Devre Dışı Bırak*\n\n`;
