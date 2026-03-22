@@ -469,24 +469,46 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
       // #durum — bot durumu ozeti
       if (metin === '#durum') {
-        const susturulanSayisi = insanDevraldi.size;
-        const bekleyenSayisi = bekleyenOnaylar.size;
-        const susturListesi = [...insanDevraldi.keys()].slice(0,8).join('\n') || '-';
-        await banaGonder(
-          `📊 *Bot Durumu*\n\n` +
-          `🤫 Susturulan: ${susturulanSayisi} kişi\n` +
-          `⏳ Ödeme bekleyen: ${bekleyenSayisi} kişi\n` +
-          `🆔 Benim LID: ${benimLid || 'henüz tespit edilmedi'}\n\n` +
-          `📋 *Komutlar:*\n` +
-          `#sustur 905xxx — botu sustur\n` +
-          `#ac 905xxx — botu aç\n` +
-          `#menu 905xxx — menü gönder\n` +
-          `#mesaj 905xxx Metin — mesaj gönder\n` +
-          `#onayla 905xxx — ödeme onayla\n` +
-          `#resetmusteri 905xxx — state sıfırla\n` +
-          `#reset — tümünü sıfırla\n\n` +
-          `Susturulanlar:\n${susturListesi}`
-        );
+        try {
+          const veriDurum = await getVeri();
+          const bugunStr = bugun();
+          const yarinDate = new Date(); yarinDate.setDate(yarinDate.getDate()+1);
+          const yarinStr2 = yarinDate.toISOString().split('T')[0];
+          const aktifler = veriDurum.kiralamalar.filter(k => k.durum === 'aktif');
+          const bugunBitenler = aktifler.filter(k => k.bit === bugunStr);
+          const yarinBitenler = aktifler.filter(k => k.bit === yarinStr2);
+          const gecikmisBitenler = aktifler.filter(k => k.bit < bugunStr);
+          // Bugün biten isimleri
+          const bugunIsimler = bugunBitenler.map(k => {
+            const m = veriDurum.musteriler.find(x => x.id === k.musteriId);
+            const o = veriDurum.oyunlar.find(x => x.id === k.oyunId);
+            return `• ${(m?.ad||m?.soyad||m?.tel||'?')} — ${o?.ad||'?'} (${k.tip})`;
+          }).join('\n');
+          const yarinIsimler = yarinBitenler.map(k => {
+            const m = veriDurum.musteriler.find(x => x.id === k.musteriId);
+            const o = veriDurum.oyunlar.find(x => x.id === k.oyunId);
+            return `• ${(m?.ad||m?.soyad||m?.tel||'?')} — ${o?.ad||'?'} (${k.tip})`;
+          }).join('\n');
+          const gecikmeIsimler = gecikmisBitenler.slice(0,5).map(k => {
+            const m = veriDurum.musteriler.find(x => x.id === k.musteriId);
+            const o = veriDurum.oyunlar.find(x => x.id === k.oyunId);
+            return `• ${(m?.ad||m?.soyad||m?.tel||'?')} — ${o?.ad||'?'} (${k.bit})`;
+          }).join('\n');
+          let durumMesaj = `📊 *Bot & Kiralama Durumu*\n\n`;
+          durumMesaj += `🎮 *Aktif kiralama:* ${aktifler.length}\n`;
+          durumMesaj += `⏰ *Bugün bitiyor:* ${bugunBitenler.length}${bugunBitenler.length>0?'\n'+bugunIsimler:''}\n`;
+          durumMesaj += `🔔 *Yarın bitiyor:* ${yarinBitenler.length}${yarinBitenler.length>0?'\n'+yarinIsimler:''}\n`;
+          if (gecikmisBitenler.length > 0) durumMesaj += `⚠️ *Gecikmiş:* ${gecikmisBitenler.length}\n${gecikmeIsimler}\n`;
+          durumMesaj += `\n🤫 Susturulan: ${insanDevraldi.size} kişi\n`;
+          durumMesaj += `⏳ İşlem bekleyen: ${bekleyenOnaylar.size} kişi\n\n`;
+          durumMesaj += `📋 *Komutlar:*\n`;
+          durumMesaj += `#sustur 905xxx | #ac 905xxx | #s\n`;
+          durumMesaj += `#menu 905xxx | #mesaj 905xxx Metin\n`;
+          durumMesaj += `#onayla 905xxx | #resetmusteri 905xxx | #reset`;
+          await banaGonder(durumMesaj);
+        } catch(e) {
+          await banaGonder(`📊 Bot çalışıyor\n🤫 Susturulan: ${insanDevraldi.size}\n⏳ Bekleyen: ${bekleyenOnaylar.size}`);
+        }
         return;
       }
 
@@ -912,12 +934,22 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       if (bekleyen.tip === 'uzatma_gun_bekle') {
         const gun = parseInt(metin);
         if (isNaN(gun) || gun < 1) { await mesajGonder(tel, `Kaç gün uzatmak istiyorsunuz? (sayı yazın)`); return; }
-        const ucret = bekleyen.gunluk * gun;
-        await mesajGonder(tel,
-          `🔄 *${gun} gün uzatma*\n💰 Tutar: *${fmt(ucret)}*\n\n` +
-          `*Ödeme:*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\n` +
-          `Dekontu buraya gönderin 📎`
-        );
+        // Tier indirimi hesapla
+        const tierUzat = getMusteriTierBot(musteri.id, veri);
+        const hamUcretUzat = bekleyen.gunluk * gun;
+        const indirimOraniUzat = tierUzat.indirim || 0;
+        const indirimTLUzat = Math.round(hamUcretUzat * indirimOraniUzat / 100);
+        const ucret = hamUcretUzat - indirimTLUzat;
+        let uzatmaMesaj = `🔄 *${gun} gün uzatma*\n`;
+        if (indirimOraniUzat > 0) {
+          uzatmaMesaj += `💰 Normal: ${fmt(hamUcretUzat)}\n`;
+          uzatmaMesaj += `${tierUzat.emoji} *${tierUzat.label} indirimi %${indirimOraniUzat}: -${fmt(indirimTLUzat)}*\n`;
+          uzatmaMesaj += `✅ Ödenecek: *${fmt(ucret)}*\n\n`;
+        } else {
+          uzatmaMesaj += `💰 Tutar: *${fmt(ucret)}*\n\n`;
+        }
+        uzatmaMesaj += `*Ödeme:*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\nDekontu buraya gönderin 📎`;
+        await mesajGonder(tel, uzatmaMesaj);
         bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'uzatma_dekont', gun, ucret });
         return;
       }
