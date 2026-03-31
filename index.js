@@ -54,7 +54,18 @@ function yarinStr() { const d = new Date(); d.setDate(d.getDate()+1); return d.t
 function gunFarki(d1, d2) { return Math.round((new Date(d2) - new Date(d1)) / 86400000); }
 function fmt(n) { return '₺' + (n||0).toLocaleString('tr-TR'); }
 function fmtTarih(t) { if(!t) return '?'; const [y,m,d]=t.split('-'); return `${d}.${m}.${y}`; }
-function temizTel(t) { return t.replace(/[^0-9]/g,'').replace(/^0/,'').replace(/^(?!90)/,'90'); }
+function temizTel(t) {
+  const s = t.replace(/[^0-9+]/g,'');
+  // + ile başlıyorsa uluslararası format — olduğu gibi bırak, sadece + kaldır
+  if (s.startsWith('+')) return s.slice(1);
+  const n = s.replace(/^0/,'');
+  // Sadece 10 haneli Türk numaralarına 90 ekle (5xxxxxxxxx)
+  if (n.length === 10 && n.startsWith('5')) return '90' + n;
+  // Zaten 90 ile başlıyorsa dokunma
+  if (n.startsWith('90')) return n;
+  // Diğer her şeyi olduğu gibi bırak
+  return n;
+}
 function tarihEkle(bas, gun) {
   const d = new Date(bas + 'T12:00:00');
   d.setDate(d.getDate() + gun);
@@ -72,7 +83,14 @@ function getMusteriTierBot(musteriId, veri) {
   d3ay.setMonth(d3ay.getMonth() - 3);
   const d3ayStr = d3ay.toISOString().slice(0, 10);
   const kiralar = veri.kiralamalar.filter(k => k.musteriId === musteriId && k.bas >= d3ayStr);
-  const toplam = kiralar.reduce((s, k) => s + k.net, 0);
+  let toplam = kiralar.reduce((s, k) => s + k.net, 0);
+  // Harici harcamaları da dahil et
+  const musteri = veri.musteriler.find(m => m.id === musteriId);
+  if (musteri && musteri.hariciplHarcamalar) {
+    musteri.hariciplHarcamalar.forEach(h => {
+      if (h.tarih >= d3ayStr) toplam += (h.tutar || 0);
+    });
+  }
   if (toplam >= 3000) return { seviye: 'platin', emoji: '💎', label: 'Platin', indirim: 15, toplam, sonraki: null, kalanTL: 0 };
   if (toplam >= 1500) return { seviye: 'altin',  emoji: '🥇', label: 'Altın',  indirim: 10, toplam, sonraki: 'Platin 💎', kalanTL: 3000 - toplam };
   if (toplam >= 750)  return { seviye: 'gumus',  emoji: '🥈', label: 'Gümüş',  indirim: 5,  toplam, sonraki: 'Altın 🥇',  kalanTL: 1500 - toplam };
@@ -668,8 +686,12 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     const isLid = tel.includes('@lid');
     let musteri = veri.musteriler.find(m => m.whatsappLid === tel);
     if (!musteri && !isLid) {
-      const sade = tel.replace('@c.us','').replace(/^90/,'');
-      musteri = veri.musteriler.find(m => m.tel && m.tel.replace(/[^0-9]/g,'').replace(/^0/,'') === sade);
+      const sade = tel.replace('@c.us','').replace(/^90/,'').replace(/^0/,'');
+      musteri = veri.musteriler.find(m => {
+        if (!m.tel) return false;
+        const mSade = m.tel.replace(/[^0-9]/g,'').replace(/^90/,'').replace(/^0/,'');
+        return mSade === sade || mSade.endsWith(sade) || sade.endsWith(mSade);
+      });
     }
     // LID ile geldi ama whatsappLid kayıtlı değil → telefon numarasıyla da ara
     if (!musteri && isLid) {
@@ -1035,7 +1057,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             const aktifKira = iadeKira;
             const oyun = veri.oyunlar.find(o => o.id === aktifKira.oyunId);
             // Tipe göre hesap silme hatırlatması
-            let iadeMesaj = `*${oyun?.ad}* için İade bildiriminiz alındı!✅  Teşekkürler 🎮\n\n`;
+            let iadeMesaj = `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮\n\n`;
             if (aktifKira.tip === 'primary') {
               iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen konsolunuzdan şu adımları uygulayın:\n\n`;
               iadeMesaj += `*Ayarlar → Kullanıcılar ve Hesaplar → Diğer → Çevrimdışı Oynama → Devre Dışı Bırak*\n\n`;
