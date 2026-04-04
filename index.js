@@ -1039,12 +1039,39 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         return;
       }
 
+      // Bildirim sonrası seçim (bugün/yarın biten)
+      if (bekleyen.tip === 'bildirim_secim') {
+        const kiraId = bekleyen.kiraId;
+        const gf = bekleyen.gunluk;
+        if (metin === '3') {
+          // İade
+          const iadeKira = veri.kiralamalar.find(k => k.id === kiraId);
+          const oyunIade = iadeKira ? veri.oyunlar.find(o => o.id === iadeKira.oyunId) : null;
+          bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId });
+          await mesajGonder(tel,
+            `📦 *İade Onayı*\n\n` +
+            `*${oyunIade?.ad || 'Oyun'}* için iade işlemini onaylıyor musunuz?\n\n` +
+            `*evet* yazarak onaylayın.`
+          );
+          return;
+        } else if (metin === '2') {
+          // Uzatma
+          bekleyenOnaylar.set(tel, { tip: 'uzatma_gun_bekle', kiraId, gunluk: gf });
+          await mesajGonder(tel, `🔄 *Süre Uzatma*\n\nKaç gün uzatmak istiyorsunuz?`);
+          return;
+        } else {
+          await mesajGonder(tel, `📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın`);
+          return;
+        }
+      }
+
       if (bekleyen.tip === 'iade_onay') {
         if (metin === 'evet') {
           // bekleyen.kiraId ile doğru kiralamanın bulunması
+          const aktifKiralar = veri.kiralamalar.filter(k => k.musteriId === musteri.id && k.durum === 'aktif');
           const iadeKira = bekleyen.kiraId
             ? veri.kiralamalar.find(k => k.id === bekleyen.kiraId)
-            : aktifKira;
+            : aktifKiralar[0];
           if (iadeKira) {
             iadeKira.durum = 'teslim';
             // Oyun durumunu güncelle
@@ -1053,12 +1080,12 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               const halaKirada = veri.kiralamalar.some(k => k.id !== iadeKira.id && k.oyunId === iadeKira.oyunId && k.durum === 'aktif');
               if (!halaKirada) oyunIade.durum = 'mevcut';
             }
+            bekleyenOnaylar.delete(tel);
             await setVeri(veri);
-            const aktifKira = iadeKira;
-            const oyun = veri.oyunlar.find(o => o.id === aktifKira.oyunId);
+            const oyun = veri.oyunlar.find(o => o.id === iadeKira.oyunId);
             // Tipe göre hesap silme hatırlatması
             let iadeMesaj = `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮\n\n`;
-            if (aktifKira.tip === 'primary') {
+            if (iadeKira.tip === 'primary') {
               iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen konsolunuzdan şu adımları uygulayın:\n\n`;
               iadeMesaj += `*Ayarlar → Kullanıcılar ve Hesaplar → Diğer → Çevrimdışı Oynama → Devre Dışı Bırak*\n\n`;
               iadeMesaj += `Bu adımı tamamladıktan sonra hesabı konsolunuzdan silebilirsiniz 🙏`;
@@ -1066,7 +1093,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen hesabı konsolunuzdan silmeyi unutmayın 🙏`;
             }
             await mesajGonder(tel, iadeMesaj);
-            await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n🎯 ${aktifKira.tip}\n\n⚠️ Hesabı geri almayı unutma!`);
+            await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n🎯 ${iadeKira.tip}\n\n⚠️ Hesabı geri almayı unutma!`);
 
             // Tavsiye sistemi — müşterinin geçmiş kiralamaları dışındaki müsait oyunları öner
             try {
@@ -1094,7 +1121,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               const musaitOneriler = veri.oyunlar.filter(o =>
                 !o.deaktif &&
                 (!o.cikis || o.cikis <= bugun()) &&
-                o.id !== aktifKira.oyunId &&
+                o.id !== iadeKira.oyunId &&
                 !kiraliOyunIds.has(o.id)
               ).map(o => ({
                 oyun: o,
@@ -1358,8 +1385,8 @@ async function yarinBitenKontrol() {
     const hedef = m.whatsappLid || (m.tel ? temizTel(m.tel) + '@c.us' : null);
     if (!hedef) continue;
     const gf = gunlukFiyat(o, k.tip);
-    await mesajGonder(hedef, `🔔 *Hatırlatıcı*\n\nMerhaba!\n*${o?.ad}* oyununuz *yarın* bitiyor.\n\nUzatmak için *2* yazın 🎮`);
-    bekleyenOnaylar.set(hedef, { tip: 'uzatma_gun_bekle', kiraId: k.id, gunluk: gf });
+    await mesajGonder(hedef, `🔔 *Hatırlatıcı*\n\nMerhaba!\n*${o?.ad}* oyununuz *yarın* bitiyor.\n\n📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın 🎮`);
+    bekleyenOnaylar.set(hedef, { tip: 'bildirim_secim', kiraId: k.id, gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
 }
@@ -1382,7 +1409,7 @@ async function bugunBitenKontrol() {
       `🔄 *Uzatmak için* → *2* yazın\n\n` +
       `Teşekkürler! 🎮`
     );
-    // Direkt uzatma state'ine alma — müşteri seçsin
+    bekleyenOnaylar.set(hedef, { tip: 'bildirim_secim', kiraId: k.id, gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
 }
