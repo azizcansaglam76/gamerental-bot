@@ -77,6 +77,15 @@ function gunlukFiyat(oyun, tip) {
     : (oyun.gunlukSec || Math.round((oyun.gunluk||0) * 0.85));
 }
 
+// ── BEKLEYENLERİ ÇİFT KAYDET (hem lid hem tel) ──
+function bekleyenSet(musteri, veri_obj) {
+  if (musteri.whatsappLid) bekleyenOnaylar.set(musteri.whatsappLid, veri_obj);
+  if (musteri.tel) {
+    const telKey = temizTel(musteri.tel) + '@c.us';
+    bekleyenOnaylar.set(telKey, veri_obj);
+  }
+}
+
 // ── TİER SİSTEMİ ──
 function getMusteriTierBot(musteriId, veri) {
   const d3ay = new Date();
@@ -1386,7 +1395,7 @@ async function yarinBitenKontrol() {
     if (!hedef) continue;
     const gf = gunlukFiyat(o, k.tip);
     await mesajGonder(hedef, `🔔 *Hatırlatıcı*\n\nMerhaba!\n*${o?.ad}* oyununuz *yarın* bitiyor.\n\n📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın 🎮`);
-    bekleyenOnaylar.set(hedef, { tip: 'bildirim_secim', kiraId: k.id, gunluk: gf });
+    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: k.id, gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
 }
@@ -1409,7 +1418,7 @@ async function bugunBitenKontrol() {
       `🔄 *Uzatmak için* → *2* yazın\n\n` +
       `Teşekkürler! 🎮`
     );
-    bekleyenOnaylar.set(hedef, { tip: 'bildirim_secim', kiraId: k.id, gunluk: gf });
+    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: k.id, gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
 }
