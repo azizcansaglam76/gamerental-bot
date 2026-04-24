@@ -574,7 +574,9 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
         // Yeni kiralama onayla
         if (hedefBekleyen.tip === 'yeni_kiralama_bekle') {
-          const yeniId = (veri2.nextId?.k || 400) + 1;
+          // Güvenli ID üretimi — mevcut max ID'den hesapla, race condition önlenir
+          const maxKiraId = veri2.kiralamalar.reduce((m, k) => Math.max(m, k.id || 0), 0);
+          const yeniId = Math.max(maxKiraId, veri2.nextId?.k || 0) + 1;
           const bas = hedefBekleyen.bas || bugun();
           const bit = hedefBekleyen.bit || tarihEkle(bas, hedefBekleyen.toplamGun || hedefBekleyen.gun);
           const hediyeGun = hedefBekleyen.hediye || 0;
@@ -587,7 +589,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             onOdeme: hedefBekleyen.ucret, hediyeGun, notlar: 'Bot ile eklendi', durum: 'aktif',
           });
           if (!veri2.nextId) veri2.nextId = {};
-          veri2.nextId.k = yeniId;
+          veri2.nextId.k = yeniId + 1; // Sonraki için +1 kaydet
           // Oyun istatistiklerini güncelle
           const oyunStat = veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId);
           if (oyunStat) {
@@ -844,7 +846,8 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const veri2 = await getVeri();
         if (!veri2.rezervasyonlar) veri2.rezervasyonlar = [];
         const siradakiSayi = veri2.rezervasyonlar.filter(r => r.oyunId === bekleyen.oyunId && r.tip === kiraTip && r.durum === 'bekliyor').length;
-        const yeniRezervId = (veri2.nextId?.r || 1);
+        const maxRezervId = veri2.rezervasyonlar?.reduce((m, r) => Math.max(m, r.id || 0), 0) || 0;
+        const yeniRezervId = Math.max(maxRezervId, veri2.nextId?.r || 0) + 1;
         if (!veri2.nextId) veri2.nextId = {};
         veri2.nextId.r = yeniRezervId + 1;
         veri2.rezervasyonlar.push({
@@ -878,7 +881,8 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const veri2 = await getVeri();
         if (!veri2.rezervasyonlar) veri2.rezervasyonlar = [];
         const siradakiSayi = veri2.rezervasyonlar.filter(r => r.oyunId === bekleyen.oyunId && r.tip === kiraTip && r.durum === 'bekliyor').length;
-        const yeniRezervId = (veri2.nextId?.r || 1);
+        const maxRezervId = veri2.rezervasyonlar?.reduce((m, r) => Math.max(m, r.id || 0), 0) || 0;
+        const yeniRezervId = Math.max(maxRezervId, veri2.nextId?.r || 0) + 1;
         if (!veri2.nextId) veri2.nextId = {};
         veri2.nextId.r = yeniRezervId + 1;
         veri2.rezervasyonlar.push({
@@ -1079,10 +1083,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           // bekleyen.kiraId ile doğru kiralamanın bulunması
           const aktifKiralar = veri.kiralamalar.filter(k => k.musteriId === musteri.id && k.durum === 'aktif');
           const iadeKira = bekleyen.kiraId
-            ? veri.kiralamalar.find(k => k.id === bekleyen.kiraId)
+            ? veri.kiralamalar.find(k => k.id == bekleyen.kiraId) // == ile tip uyumsuzluğunu önle
             : aktifKiralar[0];
           if (iadeKira) {
             iadeKira.durum = 'teslim';
+            iadeKira.teslimTarih = new Date().toISOString().split('T')[0]; // Teslim tarihi kaydet
             // Oyun durumunu güncelle
             const oyunIade = veri.oyunlar.find(o => o.id === iadeKira.oyunId);
             if (oyunIade) {
@@ -1395,7 +1400,7 @@ async function yarinBitenKontrol() {
     if (!hedef) continue;
     const gf = gunlukFiyat(o, k.tip);
     await mesajGonder(hedef, `🔔 *Hatırlatıcı*\n\nMerhaba!\n*${o?.ad}* oyununuz *yarın* bitiyor.\n\n📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın 🎮`);
-    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: k.id, gunluk: gf });
+    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
 }
@@ -1418,7 +1423,7 @@ async function bugunBitenKontrol() {
       `🔄 *Uzatmak için* → *2* yazın\n\n` +
       `Teşekkürler! 🎮`
     );
-    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: k.id, gunluk: gf });
+    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
 }
