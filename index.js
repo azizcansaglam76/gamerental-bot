@@ -289,40 +289,40 @@ app.post('/webhook', async (req, res) => {
     if (benimMesajim && !benimLid) { benimLid = tel; console.log(`📱 Benim LID: ${benimLid}`); }
 
     if (benimMesajim) {
-      if (metinOrijinal.startsWith('#')) {
-        // # komutu — aşağıda işle
-      } else {
-        // Ben bir müşteriye yazdım — o müşteriyi sustur
-        // Waha fromMe:false gönderdiği için msg.to güvenilir değil
-        // Bunun yerine son bot mesajı gönderilen LID'i sustur (sonMesajGonderilenLid map'inden)
-        const hedef = msg.fromMe ? msg.to : null;
-        const susturulanlar = new Set();
+      if (metinOrijinal === '##') {
+        // ## — sadece bu sohbeti sustur
+        const hedef = msg.to;
         if (hedef) {
           const s9 = hedef.replace(/[^0-9]/g,'').slice(-9);
           insanDevraldi.set(hedef, Date.now());
           insanDevraldi.set(s9 + '@c.us', Date.now());
           insanDevraldi.set(s9 + '@lid', Date.now());
-          susturulanlar.add(hedef);
+          console.log(`🔇 ## → sadece susturuldu: ${hedef}`);
         }
-        // sonMesajGonderilenLid'den tüm aktif müşterileri sustur
-        for (const [s9, lid] of sonMesajGonderilenLid) {
-          insanDevraldi.set(lid, Date.now());
+        return;
+      } else if (metinOrijinal === '##a' || metinOrijinal === '##ac') {
+        // ##a — bu sohbetin susturmasını aç
+        const hedef = msg.to;
+        if (hedef) {
+          const s9 = hedef.replace(/[^0-9]/g,'').slice(-9);
+          insanDevraldi.delete(hedef);
+          insanDevraldi.delete(s9 + '@c.us');
+          insanDevraldi.delete(s9 + '@lid');
+          console.log(`🔊 ##a → susturma kaldırıldı: ${hedef}`);
+        }
+        return;
+      } else if (metinOrijinal.startsWith('#')) {
+        // # komutu — aşağıda işle
+      } else {
+        // Ben bir müşteriye yazdım — sadece o sohbeti sustur
+        const hedef = msg.fromMe ? msg.to : null;
+        if (hedef) {
+          const s9 = hedef.replace(/[^0-9]/g,'').slice(-9);
+          insanDevraldi.set(hedef, Date.now());
           insanDevraldi.set(s9 + '@c.us', Date.now());
           insanDevraldi.set(s9 + '@lid', Date.now());
-          susturulanlar.add(lid);
+          console.log(`👤 İşletmeci yazdı → susturuldu: ${hedef}`);
         }
-        // bekleyenOnaylar'daki aktif müşterileri de sustur
-        for (const [k] of bekleyenOnaylar) {
-          const ks9 = k.replace(/[^0-9]/g,'').slice(-9);
-          insanDevraldi.set(k, Date.now());
-          insanDevraldi.set(ks9 + '@c.us', Date.now());
-          insanDevraldi.set(ks9 + '@lid', Date.now());
-          susturulanlar.add(k);
-        }
-        if (susturulanlar.size > 0) {
-          console.log(`👤 İşletmeci yazdı → susturuldu: ${susturulanlar.size} kişi`);
-        }
-        sonMesajGonderilenLid.clear();
         return;
       }
     }
