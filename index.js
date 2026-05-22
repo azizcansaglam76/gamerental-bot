@@ -755,10 +755,15 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       return;
     }
 
-    // ── LID İLE GELİYOR AMA SİSTEMDE YOK ──
-    if (!musteri && isLid) {
-      bekleyenOnaylar.set(tel, { tip: 'telefon_bekle' });
-      await mesajGonder(tel, `👋 Merhaba! GameRental'a hoş geldiniz 🎮\n\nSizi sistemde bulmak için kayıtlı telefon numaranızı yazar mısınız?\n(Örn: 5301234567)`);
+    // ── SİSTEMDE KAYITLI DEĞİL (hem LID hem @c.us) ──
+    if (!musteri) {
+      const zatenBekliyor = bekleyen?.tip === 'telefon_bekle';
+      if (!zatenBekliyor) {
+        bekleyenOnaylar.set(tel, { tip: 'telefon_bekle' });
+        await mesajGonder(tel, `👋 Merhaba! GameRental'a hoş geldiniz 🎮\n\nSizi sistemde bulmak için kayıtlı telefon numaranızı yazar mısınız?\n(Örn: 5301234567)`);
+        // Bana bildirim gönder
+        await banaGonder(`🆕 *Yeni/Kayıtsız Ziyaretçi*\n\nWhatsApp: ${tel}\nMesaj: "${metinOrijinal.slice(0,60)}"\n\n💬 Sisteme eklemek için siteden müşteri oluştur.`);
+      }
       return;
     }
 
@@ -1052,6 +1057,39 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         return;
       }
 
+      // Çoklu kiralama — uzatma oyun seçimi
+      if (bekleyen.tip === 'uzatma_oyun_sec') {
+        const sayi = parseInt(metin);
+        const kiralar = bekleyen.kiralar || [];
+        if (isNaN(sayi) || sayi < 1 || sayi > kiralar.length) {
+          await mesajGonder(tel, `Lütfen listeden bir numara yazın (1-${kiralar.length})`);
+          return;
+        }
+        const secilenKiraId = kiralar[sayi - 1];
+        const secilenKira = veri.kiralamalar.find(k => k.id === secilenKiraId);
+        const o = veri.oyunlar.find(x => x.id === secilenKira?.oyunId);
+        const gf = gunlukFiyat(o, secilenKira?.tip);
+        await mesajGonder(tel, `🔄 *Süre Uzatma*\n\n🎮 *${o?.ad}*\n📅 Bitiş: ${secilenKira?.bit}\n💰 Günlük: ${fmt(gf)}\n\nKaç gün uzatmak istiyorsunuz?`);
+        bekleyenOnaylar.set(tel, { tip: 'uzatma_gun_bekle', kiraId: secilenKiraId, musteriId: secilenKira?.musteriId, gunluk: gf });
+        return;
+      }
+
+      // Çoklu kiralama — iade oyun seçimi
+      if (bekleyen.tip === 'iade_oyun_sec') {
+        const sayi = parseInt(metin);
+        const kiralar = bekleyen.kiralar || [];
+        if (isNaN(sayi) || sayi < 1 || sayi > kiralar.length) {
+          await mesajGonder(tel, `Lütfen listeden bir numara yazın (1-${kiralar.length})`);
+          return;
+        }
+        const secilenKiraId = kiralar[sayi - 1];
+        const secilenKira = veri.kiralamalar.find(k => k.id === secilenKiraId);
+        const o = veri.oyunlar.find(x => x.id === secilenKira?.oyunId);
+        await mesajGonder(tel, `📦 *${o?.ad}* oyununu iade etmek istiyorsunuz.\n\n*evet* yazarak onaylayın.`);
+        bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId: secilenKiraId });
+        return;
+      }
+
       // Bildirim sonrası seçim (bugün/yarın biten)
       if (bekleyen.tip === 'bildirim_secim') {
         const kiraId = bekleyen.kiraId;
@@ -1237,19 +1275,43 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     // 2 — Uzatma
     if (metin === '2' || metin.includes('uzat')) {
       if (!aktifKira) { await mesajGonder(tel, `Aktif kiralama bulunmuyor 🎮`); return; }
-      const o = veri.oyunlar.find(x => x.id === aktifKira.oyunId);
-      const gf = gunlukFiyat(o, aktifKira.tip);
-      await mesajGonder(tel, `🔄 *Süre Uzatma*\n\n🎮 *${o?.ad}*\n📅 Bitiş: ${aktifKira.bit}\n💰 Günlük: ${fmt(gf)}\n\nKaç gün uzatmak istiyorsunuz?`);
-      bekleyenOnaylar.set(tel, { tip: 'uzatma_gun_bekle', kiraId: aktifKira.id, musteriId: aktifKira.musteriId, gunluk: gf });
+      if (aktifKiralar.length === 1) {
+        // Tek kiralama — direkt uzat
+        const o = veri.oyunlar.find(x => x.id === aktifKira.oyunId);
+        const gf = gunlukFiyat(o, aktifKira.tip);
+        await mesajGonder(tel, `🔄 *Süre Uzatma*\n\n🎮 *${o?.ad}*\n📅 Bitiş: ${aktifKira.bit}\n💰 Günlük: ${fmt(gf)}\n\nKaç gün uzatmak istiyorsunuz?`);
+        bekleyenOnaylar.set(tel, { tip: 'uzatma_gun_bekle', kiraId: aktifKira.id, musteriId: aktifKira.musteriId, gunluk: gf });
+      } else {
+        // Birden fazla kiralama — hangisini uzatacak?
+        let txt = `🔄 *Süre Uzatma*\n\nHangi oyunu uzatmak istiyorsunuz?\n\n`;
+        aktifKiralar.forEach((k, i) => {
+          const o = veri.oyunlar.find(x => x.id === k.oyunId);
+          txt += `*${i+1}* - 🎮 ${o?.ad||'?'} (${k.tip}) — bitiş: ${k.bit}\n`;
+        });
+        await mesajGonder(tel, txt);
+        bekleyenOnaylar.set(tel, { tip: 'uzatma_oyun_sec', kiralar: aktifKiralar.map(k => k.id) });
+      }
       return;
     }
 
     // 3 — İade
     if (metin === '3' || metin.includes('iade') || metin.includes('teslim') || metin.includes('bitir')) {
       if (!aktifKira) { await mesajGonder(tel, `Aktif kiralama bulunmuyor 🎮`); return; }
-      const o = veri.oyunlar.find(x => x.id === aktifKira.oyunId);
-      await mesajGonder(tel, `📦 *${o?.ad}* oyununu iade etmek istiyorsunuz.\n\n*evet* yazarak onaylayın.`);
-      bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId: aktifKira.id });
+      if (aktifKiralar.length === 1) {
+        // Tek kiralama — direkt iade
+        const o = veri.oyunlar.find(x => x.id === aktifKira.oyunId);
+        await mesajGonder(tel, `📦 *${o?.ad}* oyununu iade etmek istiyorsunuz.\n\n*evet* yazarak onaylayın.`);
+        bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId: aktifKira.id });
+      } else {
+        // Birden fazla kiralama — hangisini iade edecek?
+        let txt = `📦 *İade*\n\nHangi oyunu iade etmek istiyorsunuz?\n\n`;
+        aktifKiralar.forEach((k, i) => {
+          const o = veri.oyunlar.find(x => x.id === k.oyunId);
+          txt += `*${i+1}* - 🎮 ${o?.ad||'?'} (${k.tip}) — bitiş: ${k.bit}\n`;
+        });
+        await mesajGonder(tel, txt);
+        bekleyenOnaylar.set(tel, { tip: 'iade_oyun_sec', kiralar: aktifKiralar.map(k => k.id) });
+      }
       return;
     }
 
