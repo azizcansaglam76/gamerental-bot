@@ -202,7 +202,8 @@ async function banaGonder(metin) {
 //         uzatma_gun_bekle | uzatma_dekont | uzatma_isletmeci_bekle
 //         iade_onay
 const bekleyenOnaylar = new Map();
-const insanDevraldi = new Map(); // tel -> timestamp
+const insanDevraldi = new Map();
+const sonMenuGonderilen = new Map(); // Menü spam önleme // tel -> timestamp
 const INSAN_SURESI = 8 * 60 * 60 * 1000; // 8 saat (pratik olarak kalıcı)
 const sonMesajGonderilenLid = new Map(); // numara9 -> lid (botun son mesaj gönderdiği müşteri LID'i)
 let benimLid = process.env.BENIM_LID || null;
@@ -288,28 +289,38 @@ app.post('/webhook', async (req, res) => {
       || (benimTelSade.length >= 9 && telNumara.slice(-9) === benimTelSade.slice(-9));
 
 
-    // Debug log
-    if (tel.includes('238242020458651') || metinOrijinal.startsWith('#') || metinOrijinal === '##') {
-      console.log(`🔍 DEBUG tel:${tel} | benimLidTam:${benimLidTam} | benimLidKayitli:${benimLidKayitli} | telNumara:${telNumara} | fromMe:${msg.fromMe} | benimMesajim:${benimMesajim}`);
-    }
     // LID'i kaydet
     if (benimMesajim && !benimLid) { benimLid = tel; console.log(`📱 Benim LID: ${benimLid}`); }
 
     if (benimMesajim) {
-      if (metinOrijinal === '##') {
-        // ## — sadece bu sohbeti sustur
-        const hedef = msg.to;
+      if (metinOrijinal.startsWith('## ') || metinOrijinal === '##') {
+        // ## 905xxx — o numarayı sustur (kendi numarana yaz)
+        // ## — msg.to ile sustur (eski yöntem, çalışmazsa yukarıdakini kullan)
+        const parcalar = metinOrijinal.split(' ');
+        const hedefNumara = parcalar[1] ? parcalar[1].replace(/[^0-9]/g,'') : null;
+        const hedef = hedefNumara
+          ? (hedefNumara + '@c.us')
+          : msg.to;
         if (hedef) {
           const s9 = hedef.replace(/[^0-9]/g,'').slice(-9);
           insanDevraldi.set(hedef, Date.now());
           insanDevraldi.set(s9 + '@c.us', Date.now());
           insanDevraldi.set(s9 + '@lid', Date.now());
-          console.log(`🔇 ## → sadece susturuldu: ${hedef}`);
+          // LID varsa onu da sustur
+          try {
+            const veriS = await getVeri();
+            const mS = veriS.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(s9));
+            if (mS?.whatsappLid) insanDevraldi.set(mS.whatsappLid, Date.now());
+          } catch(e) {}
+          console.log(`🔇 ## → susturuldu: ${hedef}`);
+          await banaGonder(`🔇 Susturuldu: ${hedef}`);
         }
         return;
-      } else if (metinOrijinal === '##a' || metinOrijinal === '##ac') {
-        // ##a — bu sohbetin susturmasını aç
-        const hedef = msg.to;
+      } else if (metinOrijinal.startsWith('##a ') || metinOrijinal === '##a' || metinOrijinal === '##ac') {
+        // ##a 905xxx — susturmayı aç
+        const parcalar = metinOrijinal.split(' ');
+        const hedefNumara = parcalar[1] ? parcalar[1].replace(/[^0-9]/g,'') : null;
+        const hedef = hedefNumara ? (hedefNumara + '@c.us') : msg.to;
         if (hedef) {
           const s9 = hedef.replace(/[^0-9]/g,'').slice(-9);
           insanDevraldi.delete(hedef);
@@ -653,22 +664,6 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           return;
         }
         await banaGonder(`Bilinmeyen bekleyen tip: ${hedefBekleyen.tip}`);
-        return;
-      }
-
-      // #durum — aktif kiralamaları göster
-      if (metin === '#durum') {
-        const veri2 = await getVeri();
-        const aktifler = veri2.kiralamalar.filter(k => k.durum === 'aktif');
-        const bugunTar = bugun();
-        let msg2 = `📊 *Aktif Kiralamalar (${aktifler.length})*\n\n`;
-        aktifler.forEach(k => {
-          const o = veri2.oyunlar.find(x => x.id === k.oyunId);
-          const m = veri2.musteriler.find(x => x.id === k.musteriId);
-          const gecikme = k.bit < bugunTar ? `⚠️ ${gunFarki(k.bit, bugunTar)}g gecikme` : `✅ ${gunFarki(bugunTar, k.bit)}g kaldı`;
-          msg2 += `🎮 ${o?.ad||'?'} | ${m?.soyad||m?.ad||'?'} | ${k.bit} | ${gecikme}\n`;
-        });
-        await banaGonder(msg2);
         return;
       }
 
@@ -1446,11 +1441,16 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       return;
     }
 
-    // Anlaşılmayan mesaj — menüye yönlendir
-    await mesajGonder(tel,
-      `Merhaba ${musteriAd}! 😊\n\nAşağıdaki seçeneklerden birini yazabilirsin:\n\n` +
-      `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
-    );
+    // Anlaşılmayan mesaj — menüye yönlendir (10 dakikada bir)
+    const sonMenu = sonMenuGonderilen.get(tel) || 0;
+    const menuAralik = 10 * 60 * 1000; // 10 dakika
+    if (Date.now() - sonMenu > menuAralik) {
+      sonMenuGonderilen.set(tel, Date.now());
+      await mesajGonder(tel,
+        `Merhaba ${musteriAd}! 😊\n\nAşağıdaki seçeneklerden birini yazabilirsin:\n\n` +
+        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
+      );
+    }
 
   } catch (err) {
     console.error('Webhook genel hata:', err.message, err.stack);
