@@ -277,14 +277,21 @@ app.post('/webhook', async (req, res) => {
     const benimTelSade = (CONFIG.BENIM_NUMARAM || '').replace(/[^0-9]/g,'').replace(/^90/,'');
     const telNumara = tel.replace('@c.us','').replace('@lid','').replace(/[^0-9]/g,'');
     const benimLidKayitli = (process.env.BENIM_LID || benimLid || '').replace(/[^0-9]/g,'');
+    const benimLidTam = (process.env.BENIM_LID || benimLid || '');
     // Telefon numarası sonu veya LID eşleşmesi
     const benimMesajim = msg.fromMe
       || tel === benimLid
+      || tel === benimLidTam
       || telNumara === benimLidKayitli
+      || (benimLidKayitli.length > 5 && telNumara === benimLidKayitli)
       || (benimTelSade.length >= 9 && telNumara.endsWith(benimTelSade))
       || (benimTelSade.length >= 9 && telNumara.slice(-9) === benimTelSade.slice(-9));
 
 
+    // Debug log
+    if (tel.includes('238242020458651') || metinOrijinal.startsWith('#') || metinOrijinal === '##') {
+      console.log(`🔍 DEBUG tel:${tel} | benimLidTam:${benimLidTam} | benimLidKayitli:${benimLidKayitli} | telNumara:${telNumara} | fromMe:${msg.fromMe} | benimMesajim:${benimMesajim}`);
+    }
     // LID'i kaydet
     if (benimMesajim && !benimLid) { benimLid = tel; console.log(`📱 Benim LID: ${benimLid}`); }
 
@@ -454,7 +461,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           try {
             const veriM = await getVeri();
             const mM = veriM.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(sade) || (m.whatsappLid||'').includes(sade));
-            const adM = mM ? ((mM.ad || mM.soyad || '').trim() || 'Merhaba') : 'Merhaba';
+            const adM = mM ? (((mM.ad||'') + ' ' + (mM.soyad||'')).trim() || mM.tel || 'Müşteri') : 'Müşteri';
             const hedefKey = (mM && mM.whatsappLid) ? mM.whatsappLid : (sade + '@c.us');
             stateTemizle(hedefKey);
             await mesajGonder(hedefKey,
