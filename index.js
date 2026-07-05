@@ -115,8 +115,23 @@ function getMusteriTierBot(musteriId, veri) {
   return                             { seviye: 'bronz',  emoji: '🥉', label: 'Bronz',  indirim: 0, toplam, sonraki: 'Gümüş 🥈', kalanTL: T.gumus - toplam };
 }
 
-function tierMesajiOlustur(tier, musteriAd) {
+function tierMesajiOlustur(tier, musteriAd, veri) {
   const adSoyad = musteriAd || 'Müşterimiz';
+  // Dinamik eşikler
+  const ta = (veri && veri.tierAyarlar) || {};
+  const T = {
+    gumus:      ta.gumus      ?? 750,
+    altin:      ta.altin      ?? 1500,
+    platin:     ta.platin     ?? 3000,
+    platinplus: ta.platinplus ?? 5000,
+  };
+  const I = {
+    gumus:      ta.gumusIndirim      ?? 5,
+    altin:      ta.altinIndirim      ?? 10,
+    platin:     ta.platinIndirim     ?? 15,
+    platinplus: ta.platinplusIndirim ?? 20,
+  };
+
   let mesaj = `🎮 *${adSoyad}*\n\n`;
   mesaj += `${tier.emoji} *${tier.label} Üye*\n`;
   mesaj += `📊 Son 3 ay harcama: *${fmt(tier.toplam)}*\n\n`;
@@ -127,32 +142,32 @@ function tierMesajiOlustur(tier, musteriAd) {
     mesaj += `• Standart fiyatlar\n`;
     mesaj += `• Tüm oyunlara erişim\n`;
   } else if (tier.seviye === 'gumus') {
-    mesaj += `• 🏷️ *%5 indirim* tüm kiralamalarda\n`;
+    mesaj += `• 🏷️ *%${I.gumus} indirim* tüm kiralamalarda\n`;
     mesaj += `• Tüm oyunlara erişim\n`;
   } else if (tier.seviye === 'altin') {
-    mesaj += `• 🏷️ *%10 indirim* tüm kiralamalarda\n`;
+    mesaj += `• 🏷️ *%${I.altin} indirim* tüm kiralamalarda\n`;
     mesaj += `• Öncelikli destek\n`;
     mesaj += `• Tüm oyunlara erişim\n`;
   } else if (tier.seviye === 'platin') {
-    mesaj += `• 🏷️ *%15 indirim* tüm kiralamalarda\n`;
+    mesaj += `• 🏷️ *%${I.platin} indirim* tüm kiralamalarda\n`;
     mesaj += `• 🎁 *10+ günlük kiralamalarda 5 gün hediye*\n`;
     mesaj += `• ⚡ Öncelikli destek\n`;
     mesaj += `• Tüm oyunlara erişim\n`;
   } else if (tier.seviye === 'platinplus') {
-    mesaj += `• 🏷️ *%20 indirim* tüm kiralamalarda\n`;
+    mesaj += `• 🏷️ *%${I.platinplus} indirim* tüm kiralamalarda\n`;
     mesaj += `• 🎁 *10+ günlük kiralamalarda 5 gün hediye*\n`;
     mesaj += `• 👑 *Öncelikli rezerv hakkı* — sıra beklemeden 24 saat öncelik\n`;
     mesaj += `• ⚡ Öncelikli VIP destek\n`;
     mesaj += `• Tüm oyunlara erişim\n`;
   }
 
-  // Tüm seviyelerin avantajları
+  // Tüm seviyelerin avantajları — dinamik eşiklerle
   mesaj += `\n*📋 Üyelik Seviyeleri:*\n`;
   mesaj += `🥉 *Bronz* — ₺0+\n`;
-  mesaj += `🥈 *Gümüş* — ₺750+ → %5 indirim\n`;
-  mesaj += `🥇 *Altın* — ₺1.500+ → %10 indirim\n`;
-  mesaj += `💎 *Platin* — ₺3.000+ → %15 indirim + hediye gün\n`;
-  mesaj += `👑 *Platin+* — ₺6.000+ → %20 indirim + öncelikli rezerv\n\n`;
+  mesaj += `🥈 *Gümüş* — ₺${T.gumus.toLocaleString('tr-TR')}+ → %${I.gumus} indirim\n`;
+  mesaj += `🥇 *Altın* — ₺${T.altin.toLocaleString('tr-TR')}+ → %${I.altin} indirim\n`;
+  mesaj += `💎 *Platin* — ₺${T.platin.toLocaleString('tr-TR')}+ → %${I.platin} indirim + hediye gün\n`;
+  mesaj += `👑 *Platin+* — ₺${T.platinplus.toLocaleString('tr-TR')}+ → %${I.platinplus} indirim + öncelikli rezerv\n\n`;
 
   if (tier.sonraki) {
     mesaj += `📈 *${tier.sonraki}* için *${fmt(tier.kalanTL)}* daha harca!\n`;
@@ -282,7 +297,7 @@ Ne kadar çok kiralama yaparsanız o kadar çok kazanırsınız!
 🥈 Gümüş (₺750+) → %5 indirim
 🥇 Altın (₺1.500+) → %10 indirim
 💎 Platin (₺3.000+) → %15 indirim + yeni oyunlarda da hediye gün
-👑 Platin+ (₺5.000+) → %20 indirim + öncelikli rezerv + tüm oyunlarda hediye gün
+👑 Platin+ → %20 indirim + öncelikli rezerv + tüm oyunlarda hediye gün
 
 ━━━━━━━━━━━━━━━━━━━━━
 Şimdi kaydınızı oluşturalım 😊
@@ -856,11 +871,13 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       if (!veri.musteriler) veri.musteriler = [];
       const maxMId = veri.musteriler.reduce((m, x) => Math.max(m, x.id || 0), 0);
       const yeniMId = Math.max(maxMId, veri.nextId?.m || 0) + 1;
+      // Tel normalize: 905321234567 → 5321234567 (sistemle tutarlı)
+      const telNorm = (bekleyen.numara||'').replace(/^90/, '');
       const yeniMusteri = {
         id: yeniMId,
         ad: bekleyen.ad,
         soyad,
-        tel: bekleyen.numara,
+        tel: telNorm,
         whatsappLid: tel,
         onKayit: true,
         kayitTarih: bugun(),
@@ -1478,7 +1495,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         return;
       }
       const tier = getMusteriTierBot(musteri.id, veri);
-      await mesajGonder(tel, tierMesajiOlustur(tier, musteriAd));
+      await mesajGonder(tel, tierMesajiOlustur(tier, musteriAd, veri));
       return;
     }
 
@@ -1799,6 +1816,24 @@ setInterval(async () => {
 
 // ── TOPLU DUYURU API ──
 // Site buraya POST atar: { mesaj, alicilar: [{tel, ad}], apiKey }
+app.post('/api/duyuru-onay', async (req, res) => {
+  const { tel, ad, apiKey } = req.body || {};
+  if (apiKey !== (CONFIG.WAHA_API_KEY || 'admin')) return res.status(401).json({ hata: 'Yetkisiz' });
+  if (!tel) return res.status(400).json({ hata: 'tel gerekli' });
+  try {
+    const adTemiz = (ad||'Müşterimiz').trim();
+    await mesajGonder(tel,
+      `✅ *Kaydınız Onaylandı!*\n\n` +
+      `Merhaba *${adTemiz}*! 🎉\n\n` +
+      `GameRental üyeliğiniz onaylandı, artık tüm hizmetlerimizden yararlanabilirsiniz.\n\n` +
+      `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n\nHoş geldiniz! 🎮`
+    );
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ hata: e.message });
+  }
+});
+
 app.post('/api/duyuru', async (req, res) => {
   const { mesaj, alicilar, apiKey } = req.body || {};
 
