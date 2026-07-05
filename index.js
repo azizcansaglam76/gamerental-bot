@@ -100,22 +100,64 @@ function getMusteriTierBot(musteriId, veri) {
       if (h.tarih >= d3ayStr) toplam += (h.tutar || 0);
     });
   }
-  if (toplam >= 3000) return { seviye: 'platin', emoji: '💎', label: 'Platin', indirim: 15, toplam, sonraki: null, kalanTL: 0 };
-  if (toplam >= 1500) return { seviye: 'altin',  emoji: '🥇', label: 'Altın',  indirim: 10, toplam, sonraki: 'Platin 💎', kalanTL: 3000 - toplam };
-  if (toplam >= 750)  return { seviye: 'gumus',  emoji: '🥈', label: 'Gümüş',  indirim: 5,  toplam, sonraki: 'Altın 🥇',  kalanTL: 1500 - toplam };
-  return                     { seviye: 'bronz',  emoji: '🥉', label: 'Bronz',  indirim: 0,  toplam, sonraki: 'Gümüş 🥈',  kalanTL: 750 - toplam };
+  // Eşikler Firebase'deki tierAyarlar'dan veya varsayılan
+  const ta = veri.tierAyarlar || {};
+  const T = {
+    platinplus: ta.platinplus ?? 5000,
+    platin:     ta.platin     ?? 3000,
+    altin:      ta.altin      ?? 1500,
+    gumus:      ta.gumus      ?? 750,
+  };
+  if (toplam >= T.platinplus) return { seviye: 'platinplus', emoji: '👑', label: 'Platin+', indirim: ta.platinplusIndirim??20, toplam, sonraki: null, kalanTL: 0, oncelikliRezervHakki: true };
+  if (toplam >= T.platin)     return { seviye: 'platin', emoji: '💎', label: 'Platin', indirim: ta.platinIndirim??15, toplam, sonraki: 'Platin+ 👑', kalanTL: T.platinplus - toplam };
+  if (toplam >= T.altin)      return { seviye: 'altin',  emoji: '🥇', label: 'Altın',  indirim: ta.altinIndirim??10,  toplam, sonraki: 'Platin 💎',  kalanTL: T.platin - toplam };
+  if (toplam >= T.gumus)      return { seviye: 'gumus',  emoji: '🥈', label: 'Gümüş',  indirim: ta.gumusIndirim??5,   toplam, sonraki: 'Altın 🥇',   kalanTL: T.altin - toplam };
+  return                             { seviye: 'bronz',  emoji: '🥉', label: 'Bronz',  indirim: 0, toplam, sonraki: 'Gümüş 🥈', kalanTL: T.gumus - toplam };
 }
 
 function tierMesajiOlustur(tier, musteriAd) {
   const adSoyad = musteriAd || 'Müşterimiz';
   let mesaj = `🎮 *${adSoyad}*\n\n`;
   mesaj += `${tier.emoji} *${tier.label} Üye*\n`;
-  mesaj += `📊 Son 3 ay harcama: *${fmt(tier.toplam)}*\n`;
-  if (tier.indirim > 0) mesaj += `✨ İndirim hakkın: *%${tier.indirim}*\n`;
+  mesaj += `📊 Son 3 ay harcama: *${fmt(tier.toplam)}*\n\n`;
+
+  // Mevcut avantajlar
+  mesaj += `*✨ Mevcut Avantajlarınız:*\n`;
+  if (tier.seviye === 'bronz') {
+    mesaj += `• Standart fiyatlar\n`;
+    mesaj += `• Tüm oyunlara erişim\n`;
+  } else if (tier.seviye === 'gumus') {
+    mesaj += `• 🏷️ *%5 indirim* tüm kiralamalarda\n`;
+    mesaj += `• Tüm oyunlara erişim\n`;
+  } else if (tier.seviye === 'altin') {
+    mesaj += `• 🏷️ *%10 indirim* tüm kiralamalarda\n`;
+    mesaj += `• Öncelikli destek\n`;
+    mesaj += `• Tüm oyunlara erişim\n`;
+  } else if (tier.seviye === 'platin') {
+    mesaj += `• 🏷️ *%15 indirim* tüm kiralamalarda\n`;
+    mesaj += `• 🎁 *10+ günlük kiralamalarda 5 gün hediye*\n`;
+    mesaj += `• ⚡ Öncelikli destek\n`;
+    mesaj += `• Tüm oyunlara erişim\n`;
+  } else if (tier.seviye === 'platinplus') {
+    mesaj += `• 🏷️ *%20 indirim* tüm kiralamalarda\n`;
+    mesaj += `• 🎁 *10+ günlük kiralamalarda 5 gün hediye*\n`;
+    mesaj += `• 👑 *Öncelikli rezerv hakkı* — sıra beklemeden 24 saat öncelik\n`;
+    mesaj += `• ⚡ Öncelikli VIP destek\n`;
+    mesaj += `• Tüm oyunlara erişim\n`;
+  }
+
+  // Tüm seviyelerin avantajları
+  mesaj += `\n*📋 Üyelik Seviyeleri:*\n`;
+  mesaj += `🥉 *Bronz* — ₺0+\n`;
+  mesaj += `🥈 *Gümüş* — ₺750+ → %5 indirim\n`;
+  mesaj += `🥇 *Altın* — ₺1.500+ → %10 indirim\n`;
+  mesaj += `💎 *Platin* — ₺3.000+ → %15 indirim + hediye gün\n`;
+  mesaj += `👑 *Platin+* — ₺6.000+ → %20 indirim + öncelikli rezerv\n\n`;
+
   if (tier.sonraki) {
-    mesaj += `\n📈 *${tier.sonraki}* için *${fmt(tier.kalanTL)}* daha harca!\n`;
+    mesaj += `📈 *${tier.sonraki}* için *${fmt(tier.kalanTL)}* daha harca!\n`;
   } else {
-    mesaj += `\n🏆 En üst seviyedesin, tebrikler!\n`;
+    mesaj += `🏆 En üst seviyedesin, tebrikler!\n`;
   }
   return mesaj;
 }
@@ -203,7 +245,48 @@ async function banaGonder(metin) {
 //         iade_onay
 const bekleyenOnaylar = new Map();
 const insanDevraldi = new Map();
-const sonMenuGonderilen = new Map(); // Menü spam önleme // tel -> timestamp
+const sonMenuGonderilen = new Map(); // Menü spam önleme
+const bildirimGonderildi = new Map(); // Çift bildirim önleme (tarih bazlı)
+
+const HOSGELDIN_MESAJ = `👋 *Merhaba! GameRental'a hoş geldiniz* 🎮
+
+Kayıt olmak için birkaç bilgiye ihtiyacımız var, hemen başlayalım!
+
+━━━━━━━━━━━━━━━━━━━━━
+🎮 *GameRental Hakkında*
+
+PlayStation 4 ve PlayStation 5 oyunlarını günlük kiralama sistemiyle uygun fiyata oynayabilirsiniz.
+
+*Nasıl çalışır?*
+• Oyun seçersiniz → ödeme yaparsınız → QR koduyla PS hesabına giriş yaparsınız
+• Süre bitince iade edersiniz veya uzatırsınız, bu kadar!
+
+*Kiralama Tipleri:*
+🔵 *Primary* — Oyunu çevrimdışı oynayabilirsiniz, en avantajlı seçenek
+🟣 *Secondary* — Online bağlantı gerektirir, daha uygun fiyatlı
+
+━━━━━━━━━━━━━━━━━━━━━
+🎁 *Hediye Gün Avantajı*
+
+Piyasaya çıkalı 1 ayı dolan oyunlarda *10 gün ve üzeri* kiralamalarda *5 gün hediye* eklenir!
+
+💎 *Platin üyeler* bu avantajı *yeni çıkan oyunlarda bile* kullanabilir
+👑 *Platin+ üyeler* de aynı şekilde tüm oyunlarda hediye günden yararlanır
+
+━━━━━━━━━━━━━━━━━━━━━
+🏅 *Üyelik Avantajları*
+
+Ne kadar çok kiralama yaparsanız o kadar çok kazanırsınız!
+
+🥉 Bronz → Standart fiyat
+🥈 Gümüş (₺750+) → %5 indirim
+🥇 Altın (₺1.500+) → %10 indirim
+💎 Platin (₺3.000+) → %15 indirim + yeni oyunlarda da hediye gün
+👑 Platin+ (₺5.000+) → %20 indirim + öncelikli rezerv + tüm oyunlarda hediye gün
+
+━━━━━━━━━━━━━━━━━━━━━
+Şimdi kaydınızı oluşturalım 😊
+*Adınızı* yazar mısınız?`; // tel -> timestamp
 const INSAN_SURESI = 8 * 60 * 60 * 1000; // 8 saat (pratik olarak kalıcı)
 const sonMesajGonderilenLid = new Map(); // numara9 -> lid (botun son mesaj gönderdiği müşteri LID'i)
 let benimLid = process.env.BENIM_LID || null;
@@ -747,9 +830,9 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             `✅ Merhaba *${(bulunan.ad||bulunan.soyad||'').trim()}*!\n\n*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
           );
         } else {
-          await mesajGonder(tel, `Sistemde kayıtlı bulunamadınız. Kayıt için işletmecimize ulaşın 🎮`);
-          const yeniLidKisa = tel.replace(/[^0-9]/g,"").slice(-10);
-          await banaGonder(`📵 *Yeni Müşteri*\n\nNumara: ${numara}\nWhatsApp: ${tel}\n\n💬 Susturmak için: #sustur ${yeniLidKisa}\n🤖 Menü için: #menu ${numara}`);
+          // Kayıt akışı başlat
+          bekleyenOnaylar.set(tel, { tip: 'kayit_ad_bekle', numara: '90' + numara });
+          await mesajGonder(tel, HOSGELDIN_MESAJ);
         }
       } else {
         await mesajGonder(tel, `Lütfen geçerli telefon numaranızı yazın (örn: 5301234567) 📱`);
@@ -762,6 +845,15 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       const zatenBekliyor = bekleyen?.tip === 'telefon_bekle';
       if (!zatenBekliyor) {
         bekleyenOnaylar.set(tel, { tip: 'telefon_bekle' });
+        // Tatil modundaysa önce tatil mesajı, sonra kayıt akışı
+        if (veri.tatilModu?.aktif && veri.tatilModu?.mesaj) {
+          const tatilMesajK = veri.tatilModu.mesaj
+            .replace(/\[İsim\]/g, 'Değerli Müşterimiz')
+            .replace(/\[Tarih\]/g, veri.tatilModu.tarih ? fmtTarih(veri.tatilModu.tarih) : '?')
+            .replace(/\[Süre\]/g,  veri.tatilModu.sure  || '1-2 saat');
+          await mesajGonder(tel, tatilMesajK);
+          await new Promise(r => setTimeout(r, 500));
+        }
         await mesajGonder(tel, `👋 Merhaba! GameRental'a hoş geldiniz 🎮\n\nSizi sistemde bulmak için kayıtlı telefon numaranızı yazar mısınız?\n(Örn: 5301234567)`);
         // Bana bildirim gönder
         await banaGonder(`🆕 *Yeni/Kayıtsız Ziyaretçi*\n\nWhatsApp: ${tel}\nMesaj: "${metinOrijinal.slice(0,60)}"\n\n💬 Sisteme eklemek için siteden müşteri oluştur.`);
@@ -940,7 +1032,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const oyunHediye = veri.oyunlar.find(o => o.id === bekleyen.oyunId);
         const yeniOyun = oyunHediye?.yeniOyun || false;
         const tierHediye = getMusteriTierBot(musteri.id, veri);
-        const platinMi = tierHediye.seviye === 'platin';
+        const platinMi = tierHediye.seviye === 'platin' || tierHediye.seviye === 'platinplus';
         const hediye = ((!yeniOyun || platinMi) && gun >= 10) ? 5 : 0;
         const toplamGun = gun + hediye;
         const bit = tarihEkle(bas, toplamGun);
@@ -980,8 +1072,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             `💵 Tutar: *${fmt(bekleyen.ucret)}*\n\n` +
             `Onaylamak için:\n*#onayla ${tel.replace('@c.us','').replace('@lid','')}*`
           );
+        } else if (metin === 'iptal' || metin === '#iptal' || metin === 'vazgeç' || metin === 'vazgec') {
+          bekleyenOnaylar.delete(tel);
+          await mesajGonder(tel, `❌ Kiralama iptal edildi.`);
         } else {
-          await mesajGonder(tel, `Lütfen ödeme dekontunu *fotoğraf veya PDF* olarak gönderin 📎\n\nBaşka bir şey yazmak istiyorsanız önce işlemi tamamlayın.`);
+          await mesajGonder(tel, `Lütfen ödeme dekontunu *fotoğraf veya PDF* olarak gönderin 📎\n\n❌ İptal etmek için *iptal* yazın.`);
         }
         return;
       }
@@ -1056,6 +1151,55 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           `*2* - 🟣 Secondary (${fmt(sec)}/gün)${secDolu ? ' — Dolu, sıraya girebilirsin' : ''}`
         );
         bekleyenOnaylar.set(tel, { tip: 'kiralama_tip_bekle', musteriId: bekleyen.musteriId, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad, priDolu, secDolu });
+        return;
+      }
+
+      // Kayıt akışı — ad bekle
+      if (bekleyen.tip === 'kayit_ad_bekle') {
+        const ad = metinOrijinal.trim();
+        if (ad.length < 2) { await mesajGonder(tel, `Lütfen adınızı yazın:`); return; }
+        bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'kayit_soyad_bekle', ad });
+        await mesajGonder(tel, `👍 Merhaba *${ad}*!\n\nSoyadınızı yazar mısınız?`);
+        return;
+      }
+
+      // Kayıt akışı — soyad bekle
+      if (bekleyen.tip === 'kayit_soyad_bekle') {
+        const soyad = metinOrijinal.trim();
+        if (soyad.length < 2) { await mesajGonder(tel, `Lütfen soyadınızı yazın:`); return; }
+        // Yeni müşteri oluştur
+        if (!veri.musteriler) veri.musteriler = [];
+        const maxMId = veri.musteriler.reduce((m, x) => Math.max(m, x.id || 0), 0);
+        const yeniMId = Math.max(maxMId, veri.nextId?.m || 0) + 1;
+        const yeniMusteri = {
+          id: yeniMId,
+          ad: bekleyen.ad,
+          soyad,
+          tel: bekleyen.numara,
+          whatsappLid: tel,
+          onKayit: true, // İşletmeci onayı bekliyor
+          kayitTarih: bugun(),
+        };
+        veri.musteriler.push(yeniMusteri);
+        if (!veri.nextId) veri.nextId = {};
+        veri.nextId.m = yeniMId + 1;
+        await setVeri(veri);
+        bekleyenOnaylar.delete(tel);
+        await mesajGonder(tel,
+          `✅ *Kaydınız oluşturuldu!*\n\n` +
+          `👤 ${bekleyen.ad} ${soyad}\n` +
+          `📱 ${bekleyen.numara}\n\n` +
+          `İşletmecimiz kaydınızı onayladıktan sonra tüm hizmetlerimizden yararlanabilirsiniz.\n` +
+          `En kısa sürede bildirim alacaksınız 🙏`
+        );
+        // Bana bildirim
+        await banaGonder(
+          `🆕 *Yeni Ön Kayıt!*\n\n` +
+          `👤 ${bekleyen.ad} ${soyad}\n` +
+          `📱 ${bekleyen.numara}\n` +
+          `💬 WhatsApp: ${tel}\n\n` +
+          `Onaylamak için siteden müşteri profilini düzenle ve *Ön Kayıt* etiketini kaldır.`
+        );
         return;
       }
 
@@ -1426,6 +1570,14 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         metin.includes('insan') || metin.includes('sizi') || metin.includes('sizinle') ||
         metin.includes('görüşmek') || metin.includes('konuşmak') || metin.includes('aramak') ||
         metin.includes('arayabilir') || metin.includes('yetkiliye') || metin.includes('sahibi')) {
+      // Tatil modu kontrolü
+      if (veri.tatilModu && veri.tatilModu.aktif) {
+        const tMesaj = (veri.tatilModu.mesaj || '')
+          .replace(/\[İsim\]/g, musteriAd)
+          .replace(/\[Tarih\]/g, veri.tatilModu.tarih ? fmtTarih(veri.tatilModu.tarih) : '?')
+          .replace(/\[Süre\]/g,  veri.tatilModu.sure  || '1-2 saat');
+        if (tMesaj) { await mesajGonder(tel, tMesaj); return; }
+      }
       await mesajGonder(tel,
         `👤 *Yetkili ile Görüşme*\n\n` +
         `Mesajınız alındı, yetkili en kısa sürede sizinle ilgilenecek 🙏\n\n` +
@@ -1438,6 +1590,29 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       insanDevraldi.set(telSadeYetkili + '@c.us', Date.now());
       insanDevraldi.set(telSadeYetkili + '@lid', Date.now());
       await banaGonder('\u2705 Bot susturuldu. A\u00e7mak i\u00e7in: #ac ' + telSadeYetkili);
+      return;
+    }
+
+    // Tatil modu — menü göndermeden önce kontrol
+    if (veri.tatilModu?.aktif) {
+      const sonTatil = sonMenuGonderilen.get('tatil_' + tel) || 0;
+      if (Date.now() - sonTatil > 3 * 60 * 60 * 1000) { // 3 saatte bir hatırlat
+        const tatilMesajF = (veri.tatilModu.mesaj || '')
+          .replace(/\[İsim\]/g, musteriAd)
+          .replace(/\[Tarih\]/g, veri.tatilModu.tarih ? fmtTarih(veri.tatilModu.tarih) : '?')
+          .replace(/\[Süre\]/g,  veri.tatilModu.sure  || '1-2 saat');
+        if (tatilMesajF) {
+          sonMenuGonderilen.set('tatil_' + tel, Date.now());
+          // Sadece bekleyen state yoksa gönder
+          if (!bekleyen) await mesajGonder(tel, tatilMesajF);
+        }
+      }
+    }
+
+    // #iptal — müşteri akışı iptal edebilir
+    if (metin === 'iptal' || metin === '#iptal' || metin === 'vazgeç' || metin === 'vazgec') {
+      bekleyenOnaylar.delete(tel);
+      await mesajGonder(tel, `❌ İşlem iptal edildi.\n\nAna menü için *menü* yazabilirsiniz.`);
       return;
     }
 
@@ -1468,7 +1643,11 @@ async function yarinBitenKontrol() {
     const hedef = m.whatsappLid || (m.tel ? temizTel(m.tel) + '@c.us' : null);
     if (!hedef) continue;
     const gf = gunlukFiyat(o, k.tip);
-    await mesajGonder(hedef, `🔔 *Hatırlatıcı*\n\nMerhaba!\n*${o?.ad}* oyununuz *yarın* bitiyor.\n\n📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın 🎮`);
+    const yarinKey = `yarin_${k.id}_${yarin}`;
+    if (bildirimGonderildi.get(yarinKey)) { console.log(`⏭ Zaten gönderildi: ${yarinKey}`); continue; }
+    const musteriAdi = ((m.ad||'') + ' ' + (m.soyad||'')).trim() || 'Değerli Müşteri';
+    await mesajGonder(hedef, `🔔 *Hatırlatıcı*\n\nMerhaba *${musteriAdi}*!\n*${o?.ad}* oyununuz *yarın* bitiyor.\n\n📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın 🎮`);
+    bildirimGonderildi.set(yarinKey, true);
     bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
@@ -1484,14 +1663,18 @@ async function bugunBitenKontrol() {
     const hedef = m.whatsappLid || (m.tel ? temizTel(m.tel) + '@c.us' : null);
     if (!hedef) continue;
     const gf = gunlukFiyat(o, k.tip);
+    const bugunKey = `bugun_${k.id}_${bugunTarih}`;
+    if (bildirimGonderildi.get(bugunKey)) { console.log(`⏭ Zaten gönderildi: ${bugunKey}`); continue; }
+    const musteriAdiBugun = ((m.ad||'') + ' ' + (m.soyad||'')).trim() || 'Değerli Müşteri';
     await mesajGonder(hedef,
       `⏰ *Süre Bugün Bitiyor!*\n\n` +
-      `Merhaba! *${o?.ad}* oyununuzun kiralama süresi *bugün* sona eriyor.\n\n` +
+      `Merhaba *${musteriAdiBugun}*! *${o?.ad}* oyununuzun kiralama süresi *bugün* sona eriyor.\n\n` +
       `Güven puanınızda sorun yaşamamak için lütfen:\n\n` +
       `📦 *İade etmek için* → *3* yazın\n` +
       `🔄 *Uzatmak için* → *2* yazın\n\n` +
       `Teşekkürler! 🎮`
     );
+    bildirimGonderildi.set(bugunKey, true);
     bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
@@ -1554,13 +1737,23 @@ async function rezervSiraKontrol() {
     const maxSlot = tip === 'primary' ? (o.ciftPrimary ? 2 : 1) : 1;
     if (aktifSayisi >= maxSlot) continue; // slot dolu, geç
 
-    // Slot müsait — sıradaki ilk kişiyi bul (atla=true olmayanlar)
+    // Slot müsait — sıradaki ilk kişiyi bul
+    // Platin+ üyeler sıranın başına geçer
     const siralar = veri.rezervasyonlar
       .filter(r => r.oyunId === oyunId && r.tip === tip && r.durum === 'bekliyor' && !r.atla)
-      .sort((a, b) => (a.sira || a.id) - (b.sira || b.id));
+      .sort((a, b) => {
+        const tierA = getMusteriTierBot(a.musteriId, veri);
+        const tierB = getMusteriTierBot(b.musteriId, veri);
+        const platinPlusA = tierA.seviye === 'platinplus' ? 0 : 1;
+        const platinPlusB = tierB.seviye === 'platinplus' ? 0 : 1;
+        if (platinPlusA !== platinPlusB) return platinPlusA - platinPlusB;
+        return (a.sira || a.id) - (b.sira || b.id);
+      });
 
     if (!siralar.length) continue;
     const ilk = siralar[0];
+    const ilkTier = getMusteriTierBot(ilk.musteriId, veri);
+    const oncelikli = ilkTier.seviye === 'platinplus';
 
     // Bu kişiye bugün zaten bildirim attık mı?
     const stateKey = `rezerv_bildirim_${ilk.id}`;
@@ -1577,11 +1770,12 @@ async function rezervSiraKontrol() {
     const musteriAd = m.ad || m.soyad || m.tel;
     const tipLabel = tip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
 
+    const oncelikMesaji = oncelikli ? `\n\n👑 *Platin+ Ayrıcalığı:* Sıra önceliğiniz sayesinde ilk bildirim size gönderildi! 24 saat öncelikli hakkınız var.` : '';
     await mesajGonder(hedef,
-      `🎉 *Sıran Geldi!*\n\nMerhaba ${musteriAd}!\n\n*${o.ad}* için beklediğin slot artık müsait! ${tipLabel}\n\nKiralama için ödemeyi yapıp dekontu gönder, hemen aktifleştirelim 🚀\n\n💳 IBAN: ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`
+      `🎉 *Sıran Geldi!*\n\nMerhaba ${musteriAd}!\n\n*${o.ad}* için beklediğin slot artık müsait! ${tipLabel}${oncelikMesaji}\n\nKiralama için ödemeyi yapıp dekontu gönder, hemen aktifleştirelim 🚀\n\n💳 IBAN: ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`
     );
 
-    await banaGonder(`🔔 *Rezerv Bildirimi Gönderildi*\n• ${musteriAd} → ${o.ad} (${tipLabel})`);
+    await banaGonder(`🔔 *Rezerv Bildirimi Gönderildi*\n• ${musteriAd} → ${o.ad} (${tipLabel})${oncelikli ? '\n👑 Platin+ öncelikli bildirim!' : ''}`);
 
     try { await db.collection('botState').doc(stateKey).set({ tarih: now }); } catch(e) {}
     await new Promise(r => setTimeout(r, 1000));
