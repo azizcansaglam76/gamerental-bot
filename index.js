@@ -841,6 +841,52 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     }
 
     // ── SİSTEMDE KAYITLI DEĞİL (hem LID hem @c.us) ──
+    // Kayıt akışı — musteri null olsa bile devam et
+    if (bekleyen?.tip === 'kayit_ad_bekle') {
+      const ad = metinOrijinal.trim();
+      if (ad.length < 2) { await mesajGonder(tel, `Lütfen adınızı yazın:`); return; }
+      bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'kayit_soyad_bekle', ad });
+      await mesajGonder(tel, `👍 Merhaba *${ad}*!\n\nSoyadınızı yazar mısınız?`);
+      return;
+    }
+
+    if (bekleyen?.tip === 'kayit_soyad_bekle') {
+      const soyad = metinOrijinal.trim();
+      if (soyad.length < 2) { await mesajGonder(tel, `Lütfen soyadınızı yazın:`); return; }
+      if (!veri.musteriler) veri.musteriler = [];
+      const maxMId = veri.musteriler.reduce((m, x) => Math.max(m, x.id || 0), 0);
+      const yeniMId = Math.max(maxMId, veri.nextId?.m || 0) + 1;
+      const yeniMusteri = {
+        id: yeniMId,
+        ad: bekleyen.ad,
+        soyad,
+        tel: bekleyen.numara,
+        whatsappLid: tel,
+        onKayit: true,
+        kayitTarih: bugun(),
+      };
+      veri.musteriler.push(yeniMusteri);
+      if (!veri.nextId) veri.nextId = {};
+      veri.nextId.m = yeniMId + 1;
+      await setVeri(veri);
+      bekleyenOnaylar.delete(tel);
+      await mesajGonder(tel,
+        `✅ *Kaydınız oluşturuldu!*\n\n` +
+        `👤 ${bekleyen.ad} ${soyad}\n` +
+        `📱 ${bekleyen.numara}\n\n` +
+        `İşletmecimiz kaydınızı onayladıktan sonra tüm hizmetlerimizden yararlanabilirsiniz.\n` +
+        `En kısa sürede bildirim alacaksınız 🙏`
+      );
+      await banaGonder(
+        `🆕 *Yeni Ön Kayıt!*\n\n` +
+        `👤 ${bekleyen.ad} ${soyad}\n` +
+        `📱 ${bekleyen.numara}\n` +
+        `💬 WhatsApp: ${tel}\n\n` +
+        `Onaylamak için siteden müşteri profilini düzenle.`
+      );
+      return;
+    }
+
     if (!musteri) {
       const zatenBekliyor = bekleyen?.tip === 'telefon_bekle';
       if (!zatenBekliyor) {
@@ -1151,55 +1197,6 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           `*2* - 🟣 Secondary (${fmt(sec)}/gün)${secDolu ? ' — Dolu, sıraya girebilirsin' : ''}`
         );
         bekleyenOnaylar.set(tel, { tip: 'kiralama_tip_bekle', musteriId: bekleyen.musteriId, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad, priDolu, secDolu });
-        return;
-      }
-
-      // Kayıt akışı — ad bekle
-      if (bekleyen.tip === 'kayit_ad_bekle') {
-        const ad = metinOrijinal.trim();
-        if (ad.length < 2) { await mesajGonder(tel, `Lütfen adınızı yazın:`); return; }
-        bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'kayit_soyad_bekle', ad });
-        await mesajGonder(tel, `👍 Merhaba *${ad}*!\n\nSoyadınızı yazar mısınız?`);
-        return;
-      }
-
-      // Kayıt akışı — soyad bekle
-      if (bekleyen.tip === 'kayit_soyad_bekle') {
-        const soyad = metinOrijinal.trim();
-        if (soyad.length < 2) { await mesajGonder(tel, `Lütfen soyadınızı yazın:`); return; }
-        // Yeni müşteri oluştur
-        if (!veri.musteriler) veri.musteriler = [];
-        const maxMId = veri.musteriler.reduce((m, x) => Math.max(m, x.id || 0), 0);
-        const yeniMId = Math.max(maxMId, veri.nextId?.m || 0) + 1;
-        const yeniMusteri = {
-          id: yeniMId,
-          ad: bekleyen.ad,
-          soyad,
-          tel: bekleyen.numara,
-          whatsappLid: tel,
-          onKayit: true, // İşletmeci onayı bekliyor
-          kayitTarih: bugun(),
-        };
-        veri.musteriler.push(yeniMusteri);
-        if (!veri.nextId) veri.nextId = {};
-        veri.nextId.m = yeniMId + 1;
-        await setVeri(veri);
-        bekleyenOnaylar.delete(tel);
-        await mesajGonder(tel,
-          `✅ *Kaydınız oluşturuldu!*\n\n` +
-          `👤 ${bekleyen.ad} ${soyad}\n` +
-          `📱 ${bekleyen.numara}\n\n` +
-          `İşletmecimiz kaydınızı onayladıktan sonra tüm hizmetlerimizden yararlanabilirsiniz.\n` +
-          `En kısa sürede bildirim alacaksınız 🙏`
-        );
-        // Bana bildirim
-        await banaGonder(
-          `🆕 *Yeni Ön Kayıt!*\n\n` +
-          `👤 ${bekleyen.ad} ${soyad}\n` +
-          `📱 ${bekleyen.numara}\n` +
-          `💬 WhatsApp: ${tel}\n\n` +
-          `Onaylamak için siteden müşteri profilini düzenle ve *Ön Kayıt* etiketini kaldır.`
-        );
         return;
       }
 
