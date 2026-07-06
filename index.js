@@ -100,6 +100,12 @@ function getMusteriTierBot(musteriId, veri) {
       if (h.tarih >= d3ayStr) toplam += (h.tutar || 0);
     });
   }
+  // Bakiye yüklemelerini de dahil et (son 3 ay içindekiler)
+  if (musteri && musteri.bakiyeGecmis) {
+    musteri.bakiyeGecmis.forEach(b => {
+      if (b.tutar > 0 && b.tarih >= d3ayStr) toplam += b.tutar;
+    });
+  }
   // Eşikler Firebase'deki tierAyarlar'dan veya varsayılan
   const ta = veri.tierAyarlar || {};
   const T = {
@@ -574,7 +580,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             const hedefKey = (mM && mM.whatsappLid) ? mM.whatsappLid : (sade + '@c.us');
             stateTemizle(hedefKey);
             await mesajGonder(hedefKey,
-              `👋 Merhaba *${adM}*! 🎮\n\n*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
+              `👋 Merhaba *${adM}*! 🎮\n\n*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle`
             );
             await banaGonder(`📋 Menü gönderildi: ${hedef}`);
           } catch(e) {
@@ -656,6 +662,80 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       }
 
       // #onayla 905xxx — ödeme onayla
+      // #bakiye 905xxx tutar aciklama — bakiye yükle
+      if (metin.startsWith('#bakiye ')) {
+        const parcalar = metinOrijinal.split(' ');
+        const hedefNumara = parcalar[1]?.replace(/[^0-9]/g,'');
+        const tutar = parseFloat(parcalar[2]);
+        const aciklama = parcalar.slice(3).join(' ') || 'İşletmeci yüklemesi';
+        if (hedefNumara && !isNaN(tutar) && tutar > 0) {
+          const veriBakiye = await getVeri();
+          const mBakiye = veriBakiye.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(hedefNumara.slice(-10)));
+          if (!mBakiye) { await banaGonder(`❌ Müşteri bulunamadı: ${hedefNumara}`); return; }
+          mBakiye.bakiye = (mBakiye.bakiye || 0) + tutar;
+          if (!mBakiye.bakiyeGecmis) mBakiye.bakiyeGecmis = [];
+          mBakiye.bakiyeGecmis.push({ tarih: bugun(), tutar, aciklama });
+          await setVeri(veriBakiye);
+          // Müşteriye bildirim
+          const hedefBakiye = mBakiye.whatsappLid || (mBakiye.tel ? temizTel(mBakiye.tel) + '@c.us' : null);
+          if (hedefBakiye) {
+            await mesajGonder(hedefBakiye,
+              `💰 *Bakiye Yüklendi!*\n\n` +
+              `*+${fmt(tutar)}* hesabınıza yüklendi.\n` +
+              `Güncel bakiyeniz: *${fmt(mBakiye.bakiye)}*\n\n` +
+              `Kiralamalarınızda bakiyenizi kullanabilirsiniz 🎮\n\n` +
+              `${BAKIYE_BILGI}`
+            );
+          }
+          await banaGonder(`✅ Bakiye yüklendi:\n👤 ${mBakiye.ad} ${mBakiye.soyad}\n💰 +${fmt(tutar)} → Toplam: ${fmt(mBakiye.bakiye)}`);
+        } else {
+          await banaGonder('Kullanım: #bakiye 905xxxxxxxxx 500 açıklama');
+        }
+        return;
+      }
+
+      // #kara 905xxx sebep — kara listeye al
+      if (metin.startsWith('#kara ')) {
+        const parcalar = metinOrijinal.split(' ');
+        const hedefNumara = parcalar[1]?.replace(/[^0-9]/g,'');
+        const sebep = parcalar.slice(2).join(' ') || 'Belirtilmedi';
+        if (hedefNumara && hedefNumara.length >= 10) {
+          const veriKara = await getVeri();
+          const mKara = veriKara.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(hedefNumara.slice(-10)));
+          if (!mKara) { await banaGonder(`❌ Müşteri bulunamadı: ${hedefNumara}`); return; }
+          if (!veriKara.karaListe) veriKara.karaListe = [];
+          const zatenVar = veriKara.karaListe.some(k => k.musteriId === mKara.id);
+          if (zatenVar) { await banaGonder(`⚠️ ${mKara.ad} ${mKara.soyad} zaten kara listede`); return; }
+          veriKara.karaListe.push({ musteriId: mKara.id, sebep, tarih: bugun() });
+          await setVeri(veriKara);
+          await banaGonder(`🚫 Kara listeye eklendi:\n👤 ${mKara.ad} ${mKara.soyad}\n📱 ${mKara.tel}\n📝 Sebep: ${sebep}`);
+          // Müşteriye bildirim gitsin mi?
+          const hedefKara = mKara.whatsappLid || (mKara.tel ? temizTel(mKara.tel) + '@c.us' : null);
+          if (hedefKara) {
+            await mesajGonder(hedefKara, `🚫 Hesabınız askıya alınmıştır.\nDetay için işletmecimizle iletişime geçin.`);
+          }
+        } else {
+          await banaGonder('Kullanım: #kara 905xxxxxxxxx sebep');
+        }
+        return;
+      }
+
+      // #karaaç 905xxx — kara listeden çıkar
+      if (metin.startsWith('#karaac') || metin.startsWith('#kara-ac') || metin.startsWith('#kara aç')) {
+        const hedefNumara = metinOrijinal.split(' ')[1]?.replace(/[^0-9]/g,'');
+        if (hedefNumara) {
+          const veriKaraAc = await getVeri();
+          const mKaraAc = veriKaraAc.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(hedefNumara.slice(-10)));
+          if (!mKaraAc) { await banaGonder(`❌ Müşteri bulunamadı: ${hedefNumara}`); return; }
+          veriKaraAc.karaListe = (veriKaraAc.karaListe||[]).filter(k => k.musteriId !== mKaraAc.id);
+          await setVeri(veriKaraAc);
+          await banaGonder(`✅ Kara listeden çıkarıldı: ${mKaraAc.ad} ${mKaraAc.soyad}`);
+        } else {
+          await banaGonder('Kullanım: #karaac 905xxxxxxxxx');
+        }
+        return;
+      }
+
       if (metin.startsWith('#tamam')) {
         const hedefNumara = metinOrijinal.split(' ')[1];
         if (hedefNumara) {
@@ -774,6 +854,10 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             k.bit = tarihEkle(k.bit, hedefBekleyen.gun);
             k.ucret = (k.ucret||0) + hedefBekleyen.ucret;
             k.net = (k.net||0) + hedefBekleyen.ucret;
+            // Uzatma sayısı ve geçmişi kaydet
+            k.uzatmaSayisi = (k.uzatmaSayisi || 0) + 1;
+            if (!k.uzatmalar) k.uzatmalar = [];
+            k.uzatmalar.push({ tarih: bugun(), gun: hedefBekleyen.gun, ucret: hedefBekleyen.ucret });
             // Oyun toplamGelir güncelle
             const oyunStatUzat = veri2.oyunlar.find(o => o.id === k.oyunId);
             if (oyunStatUzat) {
@@ -799,6 +883,16 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       }
 
       return; // diğer benim mesajlarımı işleme
+    }
+
+    // ── KARA LİSTE KONTROLÜ ──
+    if (musteri && (veri.karaListe||[]).some(k => k.musteriId === musteri.id)) {
+      const sonKara = sonMenuGonderilen.get('kara_' + tel) || 0;
+      if (Date.now() - sonKara > 24 * 60 * 60 * 1000) { // Günde bir kez
+        sonMenuGonderilen.set('kara_' + tel, Date.now());
+        await mesajGonder(tel, `🚫 Hesabınız askıya alınmıştır.\nDetay için işletmecimizle iletişime geçin.`);
+      }
+      return;
     }
 
     // ── İNSAN DEVRALMA KONTROLÜ ──
@@ -859,7 +953,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       bekleyenOnaylar.delete(tel);
       await mesajGonder(tel,
         `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
-        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
+        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle`
       );
       return;
     }
@@ -875,7 +969,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           bulunan.whatsappLid = tel;
           await setVeri(veri);
           await mesajGonder(tel,
-            `✅ Merhaba *${(bulunan.ad||bulunan.soyad||'').trim()}*!\n\n*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
+            `✅ Merhaba *${(bulunan.ad||bulunan.soyad||'').trim()}*!\n\n*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle`
           );
         } else {
           // Kayıt akışı başlat — tatil mesajı kayıt onayında gönderilecek
@@ -889,6 +983,33 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     }
 
     // ── SİSTEMDE KAYITLI DEĞİL (hem LID hem @c.us) ──
+    // Bakiye yükleme — dekont bekleniyor
+    if (bekleyen?.tip === 'bakiye_yukle_dekont') {
+      if (medya) {
+        // Dekont geldi — sana ilet
+        const sBakiye = bekleyen.musteriAd || 'Müşteri';
+        await banaGonder(
+          `💰 *Bakiye Yükleme Talebi*\n\n` +
+          `👤 ${sBakiye}\n` +
+          `📱 ${tel.replace(/[^0-9]/g,'').slice(-10)}\n\n` +
+          `Yüklemek için: *#bakiye ${tel.replace(/[^0-9]/g,'').slice(-10)} [tutar]*`
+        );
+        await mesajGonder(tel,
+          `✅ Dekontunuz alındı! Kısa sürede bakiyenize yüklenecektir 🙏\n\n` +
+          `İşlem tamamlandığında bildirim alacaksınız.`
+        );
+        bekleyenOnaylar.delete(tel);
+      } else if (metin === 'iptal') {
+        bekleyenOnaylar.delete(tel);
+        await mesajGonder(tel, `❌ Bakiye yükleme iptal edildi.`);
+      } else {
+        await mesajGonder(tel,
+          `📸 Lütfen havale dekontunu fotoğraf veya PDF olarak gönderin.\n\n❌ İptal için *iptal* yazın.`
+        );
+      }
+      return;
+    }
+
     // QR bekleme — musteri null olsa bile devam et
     if (bekleyen?.tip === 'qr_bekle') {
       if (medya) {
@@ -1069,6 +1190,25 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
         const veri2 = await getVeri();
         if (!veri2.rezervasyonlar) veri2.rezervasyonlar = [];
+
+        // Müşteri zaten bu oyun için sırada mı?
+        const zatenSiradaOn = veri2.rezervasyonlar.find(r =>
+          r.oyunId === bekleyen.oyunId &&
+          r.musteriId === bekleyen.musteriId &&
+          r.tip === kiraTip &&
+          r.durum === 'bekliyor'
+        );
+        if (zatenSiradaOn) {
+          const noOn = veri2.rezervasyonlar.filter(r => r.oyunId === bekleyen.oyunId && r.tip === kiraTip && r.durum === 'bekliyor' && r.id <= zatenSiradaOn.id).length;
+          bekleyenOnaylar.delete(tel);
+          await mesajGonder(tel,
+            `ℹ️ *Zaten Sıradasınız!*\n\n` +
+            `*${bekleyen.oyunAd}* için ${noOn}. sıradasınız.\n\n` +
+            `Oyun çıkınca otomatik bildirim alacaksınız 🔔`
+          );
+          return;
+        }
+
         const siradakiSayi = veri2.rezervasyonlar.filter(r => r.oyunId === bekleyen.oyunId && r.tip === kiraTip && r.durum === 'bekliyor').length;
         const maxRezervId = veri2.rezervasyonlar?.reduce((m, r) => Math.max(m, r.id || 0), 0) || 0;
         const yeniRezervId = Math.max(maxRezervId, veri2.nextId?.r || 0) + 1;
@@ -1104,6 +1244,26 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         // Firebase'e rezervasyon ekle
         const veri2 = await getVeri();
         if (!veri2.rezervasyonlar) veri2.rezervasyonlar = [];
+
+        // Müşteri zaten bu oyun için sırada mı?
+        const zatenSirada = veri2.rezervasyonlar.find(r =>
+          r.oyunId === bekleyen.oyunId &&
+          r.musteriId === bekleyen.musteriId &&
+          r.tip === kiraTip &&
+          r.durum === 'bekliyor'
+        );
+        if (zatenSirada) {
+          const siradakiNo = veri2.rezervasyonlar.filter(r => r.oyunId === bekleyen.oyunId && r.tip === kiraTip && r.durum === 'bekliyor' && r.id <= zatenSirada.id).length;
+          const tipLabel2 = kiraTip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
+          bekleyenOnaylar.delete(tel);
+          await mesajGonder(tel,
+            `ℹ️ *Zaten Sıradasınız!*\n\n` +
+            `*${bekleyen.oyunAd}* için ${tipLabel2} sırasında ${siradakiNo}. sıradasınız.\n\n` +
+            `Slot açılınca otomatik bildirim alacaksınız 🔔`
+          );
+          return;
+        }
+
         const siradakiSayi = veri2.rezervasyonlar.filter(r => r.oyunId === bekleyen.oyunId && r.tip === kiraTip && r.durum === 'bekliyor').length;
         const maxRezervId = veri2.rezervasyonlar?.reduce((m, r) => Math.max(m, r.id || 0), 0) || 0;
         const yeniRezervId = Math.max(maxRezervId, veri2.nextId?.r || 0) + 1;
@@ -1177,13 +1337,51 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         } else {
           ozet += `💰 Toplam: *${fmt(ucret)}*\n\n`;
         }
-        ozet += `*Ödeme Bilgileri:*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\nÖdemeyi yaptıktan sonra dekontu buraya gönderin 📎`;
-        await mesajGonder(tel, ozet);
-        bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont', gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit });
+        // Bakiye kontrolü
+        const mGuncel = veri.musteriler.find(m => m.id === bekleyen.musteriId);
+        const mevcutBakiye = mGuncel?.bakiye || 0;
+        if (mevcutBakiye >= ucret) {
+          ozet += `💰 *Bakiyeniz yeterli!* (${fmt(mevcutBakiye)})\n\nBakiyenizden ödensin mi?\n*evet* → Bakiyeden öde\n*hayır* → Havale ile öde`;
+          await mesajGonder(tel, ozet);
+          bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'bakiye_onay', gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit });
+        } else {
+          if (mevcutBakiye > 0) ozet += `💰 Mevcut bakiyeniz: *${fmt(mevcutBakiye)}*\n`;
+          ozet += `*Ödeme Bilgileri:*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\nÖdemeyi yaptıktan sonra dekontu buraya gönderin 📎`;
+          await mesajGonder(tel, ozet);
+          bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont', gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit });
+        }
         return;
       }
 
       // Yeni kiralama — dekont bekleniyor
+      // Bakiyeden ödeme onayı
+      if (bekleyen.tip === 'bakiye_onay') {
+        if (metin === 'evet') {
+          const mBakiyeOde = veri.musteriler.find(m => m.id === bekleyen.musteriId);
+          if (!mBakiyeOde) { await mesajGonder(tel, 'Bir hata oluştu, tekrar deneyin.'); return; }
+          if ((mBakiyeOde.bakiye||0) < bekleyen.ucret) {
+            await mesajGonder(tel, `❌ Bakiyeniz yetersiz (${fmt(mBakiyeOde.bakiye||0)}). Havale ile ödeme yapın:\n💳 ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`);
+            bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont' });
+            return;
+          }
+          // Bakiyeden düş
+          mBakiyeOde.bakiye = (mBakiyeOde.bakiye||0) - bekleyen.ucret;
+          if (!mBakiyeOde.bakiyeGecmis) mBakiyeOde.bakiyeGecmis = [];
+          mBakiyeOde.bakiyeGecmis.push({ tarih: bugun(), tutar: -bekleyen.ucret, aciklama: `${bekleyen.oyunAd} kiralaması` });
+          await setVeri(veri);
+          // Direkt onayla — dekont yok
+          bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_bekle', odemeTip: 'bakiye' });
+          await banaGonder(`💰 *Bakiyeden Ödeme*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd}\n💰 ${fmt(bekleyen.ucret)} bakiyeden düşüldü\n\n#onayla ${tel.replace(/[^0-9]/g,'').slice(-10)}`);
+          await mesajGonder(tel, `✅ *Bakiyenizden ${fmt(bekleyen.ucret)} düşüldü!*\n\nKalan bakiye: *${fmt(mBakiyeOde.bakiye)}*\n\nKiralamanız işleme alındı, kısa sürede onaylanacak 🙏`);
+        } else if (metin === 'hayır' || metin === 'hayir') {
+          bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont' });
+          await mesajGonder(tel, `Ödemeyi yaptıktan sonra dekontu gönderin 📸\n\n💳 IBAN: ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`);
+        } else {
+          await mesajGonder(tel, `Bakiyenizden ödensin mi?\n*evet* → Bakiyeden öde\n*hayır* → Havale ile öde`);
+        }
+        return;
+      }
+
       if (bekleyen.tip === 'yeni_kiralama_dekont') {
         if (medya) {
           bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_bekle' });
@@ -1257,7 +1455,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         } else if (metin === 'menü' || metin === 'menu' || metin === 'iptal') {
           bekleyenOnaylar.delete(tel);
           await mesajGonder(tel,
-            `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
+            `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle`
           );
           return;
         }
@@ -1501,7 +1699,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           bekleyenOnaylar.delete(tel);
           await mesajGonder(tel,
             `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
-            `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
+            `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle`
           );
           return;
         } else {
@@ -1517,7 +1715,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     if (['merhaba','selam','menu','menü','hi','başla','baslat','başlat','hey'].includes(metin)) {
       await mesajGonder(tel,
         `👋 Merhaba *${musteriAd}*!\n\nGameRental'a hoş geldiniz 🎮\n\n` +
-        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n\nVeya sorunuzu yazın!`
+        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle\n\nVeya sorunuzu yazın!`
       );
       return;
     }
@@ -1654,6 +1852,15 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         await banaGonder(`🛒 *Kayıtsız Kiralama Talebi*\nWhatsApp: ${tel}\nMesaj: "${metinOrijinal}"`);
         return;
       }
+      if (musteri.onKayit) {
+        await mesajGonder(tel,
+          `⏳ *Kaydınız Henüz Onaylanmadı*\n\n` +
+          `Üyeliğiniz işletmecimiz tarafından inceleniyor.\n` +
+          `Onaylandıktan sonra tüm hizmetlerimizden yararlanabilirsiniz.\n\n` +
+          `En kısa sürede bildirim alacaksınız 🙏`
+        );
+        return;
+      }
       const tumOyunlar = veri.oyunlar.filter(o => !o.deaktif).sort((a,b) => b.id - a.id);
 
       function slotDurumu(o) {
@@ -1727,6 +1934,24 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       return;
     }
 
+    // 9 — Bakiye Yükle
+    if (metin === '9' || metin.includes('bakiye') || metin.includes('bakiyem')) {
+      const mBakiyeGor = veri.musteriler.find(m => m.id === musteri.id);
+      const bakiyeMevcut = mBakiyeGor?.bakiye || 0;
+      await mesajGonder(tel,
+        `💰 *Bakiye Yükleme*\n\n` +
+        `Mevcut bakiyeniz: *${fmt(bakiyeMevcut)}*\n\n` +
+        `Bakiye yüklemek için aşağıdaki hesaba havale yapın:\n\n` +
+        `💳 IBAN: \`${CONFIG.IBAN}\`\n` +
+        `👤 Hesap Sahibi: ${CONFIG.HESAP_ISIM}\n\n` +
+        `Havale açıklamasına *adınızı ve soyadınızı* yazmayı unutmayın!\n\n` +
+        `Dekontu buraya gönderin, bakiyeniz kısa sürede yüklenecektir 🙏\n\n` +
+        `${BAKIYE_BILGI}`
+      );
+      bekleyenOnaylar.set(tel, { tip: 'bakiye_yukle_dekont', musteriId: musteri.id, musteriAd });
+      return;
+    }
+
     // 7 — Yetkili ile görüş
     if (metin === '7' || metin.includes('yetkili') || metin.includes('hocam') ||
         metin.includes('insan') || metin.includes('sizi') || metin.includes('sizinle') ||
@@ -1785,7 +2010,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       sonMenuGonderilen.set(tel, Date.now());
       await mesajGonder(tel,
         `Merhaba ${musteriAd}! 😊\n\nAşağıdaki seçeneklerden birini yazabilirsin:\n\n` +
-        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon`
+        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle`
       );
     }
 
@@ -1919,12 +2144,11 @@ async function rezervSiraKontrol() {
     const ilkTier = getMusteriTierBot(ilk.musteriId, veri);
     const oncelikli = ilkTier.seviye === 'platinplus';
 
-    // Bu kişiye bugün zaten bildirim attık mı?
-    const stateKey = `rezerv_bildirim_${ilk.id}`;
-    try {
-      const s = await db.collection('botState').doc(stateKey).get();
-      if (s.exists && s.data().tarih === now) continue;
-    } catch(e) {}
+    // Bu kişiye bugün zaten bildirim attık mı? — rezervasyon kaydında tut
+    if (ilk.sonBildirimTarih === now) {
+      console.log(`⏭ Bugün zaten bildirim gönderildi: ${ilk.id}`);
+      continue;
+    }
 
     const m = veri.musteriler.find(x => x.id === ilk.musteriId);
     if (!m) continue;
@@ -1941,7 +2165,9 @@ async function rezervSiraKontrol() {
 
     await banaGonder(`🔔 *Rezerv Bildirimi Gönderildi*\n• ${musteriAd} → ${o.ad} (${tipLabel})${oncelikli ? '\n👑 Platin+ öncelikli bildirim!' : ''}`);
 
-    try { await db.collection('botState').doc(stateKey).set({ tarih: now }); } catch(e) {}
+    // Bildirim tarihini rezervasyona kaydet
+    ilk.sonBildirimTarih = now;
+    await setVeri(veri);
     await new Promise(r => setTimeout(r, 1000));
   }
 }
@@ -1986,7 +2212,7 @@ app.post('/api/duyuru-onay', async (req, res) => {
       `✅ *Kaydınız Onaylandı!*\n\n` +
       `Merhaba *${adTemiz}*! 🎉\n\n` +
       `GameRental üyeliğiniz onaylandı, artık tüm hizmetlerimizden yararlanabilirsiniz.\n\n` +
-      `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n\nHoş geldiniz! 🎮` +
+      `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle\n\nHoş geldiniz! 🎮` +
       tatilEki
     );
     res.json({ ok: true });
