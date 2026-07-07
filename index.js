@@ -885,16 +885,6 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       return; // diğer benim mesajlarımı işleme
     }
 
-    // ── KARA LİSTE KONTROLÜ ──
-    if (musteri && (veri.karaListe||[]).some(k => k.musteriId === musteri.id)) {
-      const sonKara = sonMenuGonderilen.get('kara_' + tel) || 0;
-      if (Date.now() - sonKara > 24 * 60 * 60 * 1000) { // Günde bir kez
-        sonMenuGonderilen.set('kara_' + tel, Date.now());
-        await mesajGonder(tel, `🚫 Hesabınız askıya alınmıştır.\nDetay için işletmecimizle iletişime geçin.`);
-      }
-      return;
-    }
-
     // ── İNSAN DEVRALMA KONTROLÜ ──
     const telSade = tel.replace(/[^0-9]/g,'');
     const telSade9 = telSade.slice(-9);
@@ -923,6 +913,16 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     // ── MÜŞTERİ BUL ──
     const isLid = tel.includes('@lid');
     let musteri = veri.musteriler.find(m => m.whatsappLid === tel);
+
+    // ── KARA LİSTE KONTROLÜ ──
+    if (musteri && (veri.karaListe||[]).some(k => k.musteriId === musteri.id)) {
+      const sonKara = sonMenuGonderilen.get('kara_' + tel) || 0;
+      if (Date.now() - sonKara > 24 * 60 * 60 * 1000) {
+        sonMenuGonderilen.set('kara_' + tel, Date.now());
+        await mesajGonder(tel, `🚫 Hesabınız askıya alınmıştır.\nDetay için işletmecimizle iletişime geçin.`);
+      }
+      return;
+    }
     if (!musteri && !isLid) {
       const sade = tel.replace('@c.us','').replace(/^90/,'').replace(/^0/,'');
       musteri = veri.musteriler.find(m => {
