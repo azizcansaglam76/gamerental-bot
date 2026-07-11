@@ -1606,22 +1606,23 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
       if (bekleyen.tip === 'iade_onay') {
         if (metin === 'evet') {
-          // bekleyen.kiraId ile doğru kiralamanın bulunması
-          const aktifKiralar = veri.kiralamalar.filter(k => k.musteriId === musteri.id && k.durum === 'aktif');
+          // Taze veri çek — stale veri sorunu önle
+          const veriIade = await getVeri();
+          const aktifKiralar = veriIade.kiralamalar.filter(k => k.musteriId === musteri.id && k.durum === 'aktif');
           const iadeKira = bekleyen.kiraId
-            ? veri.kiralamalar.find(k => k.id == bekleyen.kiraId) // == ile tip uyumsuzluğunu önle
+            ? veriIade.kiralamalar.find(k => k.id == bekleyen.kiraId)
             : aktifKiralar[0];
           if (iadeKira) {
             iadeKira.durum = 'teslim';
-            iadeKira.teslimTarih = new Date().toISOString().split('T')[0]; // Teslim tarihi kaydet
+            iadeKira.teslimTarih = new Date().toISOString().split('T')[0];
             // Oyun durumunu güncelle
-            const oyunIade = veri.oyunlar.find(o => o.id === iadeKira.oyunId);
+            const oyunIade = veriIade.oyunlar.find(o => o.id === iadeKira.oyunId);
             if (oyunIade) {
-              const halaKirada = veri.kiralamalar.some(k => k.id !== iadeKira.id && k.oyunId === iadeKira.oyunId && k.durum === 'aktif');
+              const halaKirada = veriIade.kiralamalar.some(k => k.id !== iadeKira.id && k.oyunId === iadeKira.oyunId && k.durum === 'aktif');
               if (!halaKirada) oyunIade.durum = 'mevcut';
             }
             bekleyenOnaylar.delete(tel);
-            await setVeri(veri);
+            await setVeri(veriIade);
             const oyun = veri.oyunlar.find(o => o.id === iadeKira.oyunId);
             // Tipe göre hesap silme hatırlatması
             let iadeMesaj = `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮\n\n`;
@@ -1638,10 +1639,10 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             // Tavsiye sistemi — müşterinin geçmiş kiralamaları dışındaki müsait oyunları öner
             try {
               await new Promise(r => setTimeout(r, 2000)); // 2 sn bekle
-              const kiraliOyunIds = new Set(veri.kiralamalar.filter(k => k.musteriId === musteri.id).map(k => k.oyunId));
+              const kiraliOyunIds = new Set(veriIade.kiralamalar.filter(k => k.musteriId === musteri.id).map(k => k.oyunId));
               // Collaborative filtering — aynı oyunları kiralayan müşterilerin tercihlerini baz al
               const benzerlik = new Map();
-              veri.kiralamalar.forEach(k => {
+              veriIade.kiralamalar.forEach(k => {
                 if (k.musteriId === musteri.id) return;
                 if (kiraliOyunIds.has(k.oyunId)) benzerlik.set(k.musteriId, (benzerlik.get(k.musteriId)||0)+1);
               });
@@ -2003,10 +2004,12 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       return;
     }
 
-    // Anlaşılmayan mesaj — menüye yönlendir (10 dakikada bir)
+    // Anlaşılmayan mesaj — menüye yönlendir
+    // İnsan devralıyorsa veya son 30 dakika içinde menü gönderildiyse gönderme
     const sonMenu = sonMenuGonderilen.get(tel) || 0;
-    const menuAralik = 10 * 60 * 1000; // 10 dakika
-    if (Date.now() - sonMenu > menuAralik) {
+    const menuAralik = 30 * 60 * 1000; // 30 dakika
+    const insanVar = insanDevraldi.has(tel) || insanDevraldi.has(tel.replace('@lid','@c.us')) || insanDevraldi.has(tel.replace('@c.us','@lid'));
+    if (!insanVar && Date.now() - sonMenu > menuAralik) {
       sonMenuGonderilen.set(tel, Date.now());
       await mesajGonder(tel,
         `Merhaba ${musteriAd}! 😊\n\nAşağıdaki seçeneklerden birini yazabilirsin:\n\n` +
