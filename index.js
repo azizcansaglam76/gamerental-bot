@@ -92,7 +92,8 @@ function getMusteriTierBot(musteriId, veri) {
   d3ay.setMonth(d3ay.getMonth() - 3);
   const d3ayStr = d3ay.toISOString().slice(0, 10);
   const kiralar = veri.kiralamalar.filter(k => k.musteriId === musteriId && k.bas >= d3ayStr);
-  let toplam = kiralar.reduce((s, k) => s + k.net, 0);
+  // Bakiyeden ödenen kiralamaları çift saymamak için hariç tut
+  let toplam = kiralar.reduce((s, k) => s + (k.odemeTip === 'bakiye' ? 0 : k.net), 0);
   // Harici harcamaları da dahil et
   const musteri = veri.musteriler.find(m => m.id === musteriId);
   if (musteri && musteri.hariciplHarcamalar) {
