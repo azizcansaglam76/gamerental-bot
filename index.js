@@ -268,6 +268,8 @@ async function banaGonder(metin) {
 const bekleyenOnaylar = new Map();
 const insanDevraldi = new Map();
 const sonMenuGonderilen = new Map(); // Menü spam önleme
+const BAKIYE_BILGI = `ℹ️ *Bakiye Hakkında:*
+Yüklediğiniz bakiye son 3 aylık harcamanıza eklenir ve üyelik seviyenizi etkiler. 3 ay sonunda bu tutar harcama hesabından düşer, ancak bakiyeniz hesabınızda kalmaya devam eder — yalnızca üyelik seviyeniz güncel harcamalarınıza göre yeniden hesaplanır.`;
 const bildirimGonderildi = new Map(); // Çift bildirim önleme (tarih bazlı)
 
 const HOSGELDIN_MESAJ = `👋 *Merhaba! GameRental'a hoş geldiniz* 🎮
