@@ -1863,7 +1863,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         );
         return;
       }
-      const tumOyunlar = veri.oyunlar.filter(o => !o.deaktif).sort((a,b) => b.id - a.id);
+      const bugunStr = bugun();
+      // Henüz çıkmamış oyunları kiralama listesinden çıkar
+      const tumOyunlar = veri.oyunlar.filter(o => !o.deaktif && (!o.cikis || o.cikis <= bugunStr)).sort((a,b) => b.id - a.id);
+      // Çıkacak oyunlar — sıraya girebilirler
+      const cikacakOyunlarKira = veri.oyunlar.filter(o => !o.deaktif && o.cikis && o.cikis > bugunStr).sort((a,b) => a.cikis.localeCompare(b.cikis));
 
       function slotDurumu(o) {
         const aktif = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif');
@@ -1898,6 +1902,18 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
       if (!liste) { await mesajGonder(tel, `Şu an müsait oyun bulunmuyor 😔`); return; }
       await mesajGonder(tel, `🎮 *Oyun Listesi*\n\n${liste}\nKiralamak veya sıraya girmek istediğiniz oyunun adını ya da numarasını yazın.`);
+      // Çıkacak oyunları da göster — ön rezervasyon için
+      if (cikacakOyunlarKira.length > 0) {
+        liste += `\n🗓 *Yakında Çıkacak (Ön Rezervasyon):*\n`;
+        cikacakOyunlarKira.forEach(o => {
+          const pri = gunlukFiyat(o, 'primary');
+          const sec = gunlukFiyat(o, 'secondary');
+          const siradaki = (veri.rezervasyonlar||[]).filter(r => r.oyunId === o.id && r.durum === 'bekliyor').length;
+          liste += `📅 ${o.ad} (${o.platform}) — Çıkış: ${fmtTarih(o.cikis)} | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün${siradaki > 0 ? ` | 👥 ${siradaki} sırada` : ''}\n`;
+        });
+        liste += `\nÖn rezervasyon için *8* yazın 🎮`;
+      }
+
       bekleyenOnaylar.set(tel, { tip: 'kiralama_oyun_bekle', musteriId: musteri.id, musteriAd, musaitOyunlar, kiradaOyunlar });
       return;
     }
