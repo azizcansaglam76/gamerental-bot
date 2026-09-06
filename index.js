@@ -1577,7 +1577,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const secilenKira = veri.kiralamalar.find(k => k.id === secilenKiraId);
         const o = veri.oyunlar.find(x => x.id === secilenKira?.oyunId);
         await mesajGonder(tel, `📦 *${o?.ad}* oyununu iade etmek istiyorsunuz.\n\n*evet* yazarak onaylayın.`);
-        bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId: secilenKiraId });
+        bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId: secilenKiraId, musteriId: musteri?.id });
         return;
       }
 
@@ -1589,7 +1589,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           // İade
           const iadeKira = veri.kiralamalar.find(k => k.id === kiraId);
           const oyunIade = iadeKira ? veri.oyunlar.find(o => o.id === iadeKira.oyunId) : null;
-          bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId });
+          bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId, musteriId: musteri?.id });
           await mesajGonder(tel,
             `📦 *İade Onayı*\n\n` +
             `*${oyunIade?.ad || 'Oyun'}* için iade işlemini onaylıyor musunuz?\n\n` +
@@ -1611,7 +1611,9 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         if (metin === 'evet') {
           // Taze veri çek — stale veri sorunu önle
           const veriIade = await getVeri();
-          const aktifKiralar = veriIade.kiralamalar.filter(k => k.musteriId === musteri.id && k.durum === 'aktif');
+          // musteriId bekleyen'dan veya musteri'den al
+          const iadeMusteriId = bekleyen.musteriId || musteri?.id;
+          const aktifKiralar = veriIade.kiralamalar.filter(k => k.musteriId === iadeMusteriId && k.durum === 'aktif');
           const iadeKira = bekleyen.kiraId
             ? veriIade.kiralamalar.find(k => k.id == bekleyen.kiraId)
             : aktifKiralar[0];
@@ -1793,7 +1795,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         // Tek kiralama — direkt iade
         const o = veri.oyunlar.find(x => x.id === aktifKira.oyunId);
         await mesajGonder(tel, `📦 *${o?.ad}* oyununu iade etmek istiyorsunuz.\n\n*evet* yazarak onaylayın.`);
-        bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId: aktifKira.id });
+        bekleyenOnaylar.set(tel, { tip: 'iade_onay', kiraId: aktifKira.id, musteriId: musteri?.id });
       } else {
         // Birden fazla kiralama — hangisini iade edecek?
         let txt = `📦 *İade*\n\nHangi oyunu iade etmek istiyorsunuz?\n\n`;
