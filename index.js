@@ -826,10 +826,22 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           // Tier kontrolü — SONRA
           const tierSonrasi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
           const tierAtladi = tierOncesi.seviye !== tierSonrasi.seviye;
+          // Sıra ve yeni oyun kontrolü
+          const siradaVarOnay = (veri2.rezervasyonlar||[]).some(r => r.oyunId === hedefBekleyen.oyunId && r.tip === hedefBekleyen.kiraTip && r.durum === 'bekliyor');
+          const oyunCikisOnay = veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId)?.cikis;
+          const birAyOnceOnay = new Date(); birAyOnceOnay.setMonth(birAyOnceOnay.getMonth() - 1);
+          const yeniOyunOnay = oyunCikisOnay && new Date(oyunCikisOnay) > birAyOnceOnay;
+
           let onayMesaj = `✅ *Ödemeniz onaylandı!*\n\n🎮 *${hedefBekleyen.oyunAd}*\n📅 ${bas} → ${bit}`;
           if (hediyeGun > 0) onayMesaj += ` 🎁 *(+${hediyeGun} gün hediye)*`;
-          onayMesaj += `\n💰 ${fmt(hedefBekleyen.ucret)}\n\n` +
-            `📲 *Hesaba giriş için:*\n` +
+          onayMesaj += `\n💰 ${fmt(hedefBekleyen.ucret)}\n\n`;
+          if (siradaVarOnay) {
+            onayMesaj += `⚠️ *Bu oyun için sıra mevcut!*\nUzatma hakkınız yalnızca *1 kez* kullanılabilir.\n\n`;
+          }
+          if (yeniOyunOnay && siradaVarOnay) {
+            onayMesaj += `💡 *Erken İade Ödülü:* Oyunu erken iade ederseniz kalan sürenizin ücretinin *%10'u* bakiyenize yüklenir 🎁\n\n`;
+          }
+          onayMesaj += `📲 *Hesaba giriş için:*\n` +
             `PlayStation'ınızda şu adımları takip edin:\n` +
             `*1.* Ayarlar → Kullanıcılar ve Hesaplar\n` +
             `*2.* Diğer → QR Koduyla Oturum Aç\n` +
@@ -1626,11 +1638,40 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               const halaKirada = veriIade.kiralamalar.some(k => k.id !== iadeKira.id && k.oyunId === iadeKira.oyunId && k.durum === 'aktif');
               if (!halaKirada) oyunIade.durum = 'mevcut';
             }
+            // Erken iade ödülü kontrolü
+            const bugunIade = new Date().toISOString().split('T')[0];
+            const bitTarih = iadeKira.bit;
+            const oyunCikisIade = veriIade.oyunlar.find(o => o.id === iadeKira.oyunId)?.cikis;
+            const birAyOnceIade = new Date(); birAyOnceIade.setMonth(birAyOnceIade.getMonth() - 1);
+            const yeniOyunIade = oyunCikisIade && new Date(oyunCikisIade) > birAyOnceIade;
+            const siradaVarIade = (veriIade.rezervasyonlar||[]).some(r => r.oyunId === iadeKira.oyunId && r.tip === iadeKira.tip && r.durum === 'bekliyor');
+            const erkenIade = bugunIade < bitTarih;
+
+            let erkenIadeOdul = 0;
+            if (erkenIade && yeniOyunIade && siradaVarIade) {
+              // Kalan gün sayısı
+              const kalanGun = Math.round((new Date(bitTarih) - new Date(bugunIade)) / 86400000);
+              const gunlukUcret = iadeKira.net / (iadeKira.uzatmaSayisi ? iadeKira.gun || 1 : (Math.round((new Date(bitTarih) - new Date(iadeKira.bas)) / 86400000) || 1));
+              erkenIadeOdul = Math.round(kalanGun * gunlukUcret * 0.1);
+              if (erkenIadeOdul > 0) {
+                // Müşteriye bakiye ekle
+                const mIade = veriIade.musteriler.find(m => m.id === iadeMusteriId);
+                if (mIade) {
+                  mIade.bakiye = (mIade.bakiye || 0) + erkenIadeOdul;
+                  if (!mIade.bakiyeGecmis) mIade.bakiyeGecmis = [];
+                  mIade.bakiyeGecmis.push({ tarih: bugunIade, tutar: erkenIadeOdul, aciklama: `Erken iade ödülü — ${veriIade.oyunlar.find(o=>o.id===iadeKira.oyunId)?.ad||'Oyun'}` });
+                }
+              }
+            }
+
             bekleyenOnaylar.delete(tel);
             await setVeri(veriIade);
-            const oyun = veri.oyunlar.find(o => o.id === iadeKira.oyunId);
+            const oyun = veriIade.oyunlar.find(o => o.id === iadeKira.oyunId);
             // Tipe göre hesap silme hatırlatması
             let iadeMesaj = `✅ İade bildiriminiz alındı! *${oyun?.ad}* için teşekkürler 🎮\n\n`;
+            if (erkenIadeOdul > 0) {
+              iadeMesaj += `🎁 *Erken İade Ödülü!*\nKalan süreniz için *${fmt(erkenIadeOdul)}* bakiyenize yüklendi 💰\n\n`;
+            }
             if (iadeKira.tip === 'primary') {
               iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen konsolunuzdan şu adımları uygulayın:\n\n`;
               iadeMesaj += `*Ayarlar → Kullanıcılar ve Hesaplar → Diğer → Çevrimdışı Oynama → Devre Dışı Bırak*\n\n`;
@@ -1773,7 +1814,17 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         // Tek kiralama — direkt uzat
         const o = veri.oyunlar.find(x => x.id === aktifKira.oyunId);
         const gf = gunlukFiyat(o, aktifKira.tip);
-        await mesajGonder(tel, `🔄 *Süre Uzatma*\n\n🎮 *${o?.ad}*\n📅 Bitiş: ${aktifKira.bit}\n💰 Günlük: ${fmt(gf)}\n\nKaç gün uzatmak istiyorsunuz?`);
+        // Sıra ve uzatma limiti kontrolü
+        const siradaVarUzat = (veri.rezervasyonlar||[]).some(r => r.oyunId === aktifKira.oyunId && r.tip === aktifKira.tip && r.durum === 'bekliyor');
+        const uzatmaSayisi = aktifKira.uzatmaSayisi || 0;
+        if (siradaVarUzat && uzatmaSayisi >= 1) {
+          await mesajGonder(tel, `⚠️ *Uzatma Hakkınız Doldu*\n\n*${o?.ad}* için sıra mevcut olduğundan yalnızca 1 kez uzatma yapabilirsiniz.\n\nSüre dolunca iade etmeniz gerekmektedir 🙏`);
+          return;
+        }
+        let uzatMesaj = `🔄 *Süre Uzatma*\n\n🎮 *${o?.ad}*\n📅 Bitiş: ${aktifKira.bit}\n💰 Günlük: ${fmt(gf)}`;
+        if (siradaVarUzat) uzatMesaj += `\n\n⚠️ Bu oyun için sıra var — yalnızca *1 kez* uzatabilirsiniz.`;
+        uzatMesaj += `\n\nKaç gün uzatmak istiyorsunuz?`;
+        await mesajGonder(tel, uzatMesaj);
         bekleyenOnaylar.set(tel, { tip: 'uzatma_gun_bekle', kiraId: aktifKira.id, musteriId: aktifKira.musteriId, gunluk: gf });
       } else {
         // Birden fazla kiralama — hangisini uzatacak?
