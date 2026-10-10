@@ -40,17 +40,133 @@ try {
 admin.initializeApp({ credential: admin.credential.cert(serviceAccount), projectId: CONFIG.FIREBASE_PROJECT });
 const db = admin.firestore();
 
+// ── VERİ OKUMA / YAZMA ──
+// Eskiden setVeri() dokümanın tamamını, okunduğu andaki haliyle üzerine yazıyordu: bot veriyi okuduktan
+// sonra siteden yapılan değişiklikler (ör. aynı anda girilen kiralama) siliniyordu.
+// Artık her getVeri() okunan halin bir kopyasını saklar; setVeri() transaction içinde güncel veriyi okuyup
+// sadece botun DEĞİŞTİRDİĞİ kayıtları (id bazında) birleştirerek yazar. Site de aynı yöntemi kullanıyor.
+const veriRef = () => db.collection('users').doc(CONFIG.USER_UID).collection('data').doc('psrental');
+const okunanHal = new WeakMap(); // veri objesi → okunduğu andaki JSON
+const DIZI_ALANLAR = { oyunlar: 'o', musteriler: 'm', kiralamalar: 'k', rezervasyonlar: 'r', ekMaliyetler: 'mal', karaListe: 'kl', ekGelirler: 'eg' };
+
 async function getVeri() {
-  const doc = await db.collection('users').doc(CONFIG.USER_UID).collection('data').doc('psrental').get();
-  return doc.exists ? doc.data() : null;
+  const doc = await veriRef().get();
+  if (!doc.exists) return null;
+  const data = doc.data();
+  okunanHal.set(data, JSON.stringify(data));
+  return data;
 }
+
+function stable(v) {
+  if (v === undefined) return undefined;
+  return JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x))
+    ? Object.keys(x).sort().reduce((a, kk) => { a[kk] = x[kk]; return a; }, {}) : x);
+}
+const kayitAnahtar = x => (x && x.id !== undefined && x.id !== null) ? 'id:' + x.id : 'x:' + stable(x);
+function mergeArr(b, l, r) {
+  const B = new Map(b.map(x => [kayitAnahtar(x), x]));
+  const L = new Map(l.map(x => [kayitAnahtar(x), x]));
+  const R = new Map(r.map(x => [kayitAnahtar(x), x]));
+  const out = [], seen = new Set(), cakisan = [];
+  [...r.map(kayitAnahtar), ...l.map(kayitAnahtar)].forEach(key => {
+    if (seen.has(key)) return; seen.add(key);
+    const bx = B.get(key), lx = L.get(key), rx = R.get(key);
+    if (bx === undefined) {
+      if (lx !== undefined && rx !== undefined && stable(lx) !== stable(rx)) { out.push(rx); cakisan.push(lx); }
+      else out.push(lx !== undefined ? lx : rx);
+      return;
+    }
+    const v = stable(lx) !== stable(bx) ? lx : rx; // bot değiştirdiyse botunki, değiştirmediyse güncel olan
+    if (v !== undefined) out.push(v);
+  });
+  return { out, cakisan };
+}
+function merge3(base, local, remote) {
+  if (!remote || !base) return local;
+  const out = {};
+  const keys = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)]);
+  keys.delete('nextId');
+  for (const k of Object.keys(DIZI_ALANLAR)) {
+    if (!keys.has(k)) continue;
+    keys.delete(k);
+    const res = mergeArr(base[k] || [], local[k] || [], remote[k] || []);
+    // Aynı id ile iki tarafta farklı yeni kayıt → sitedekini koru, botunkine yeni id ver
+    res.cakisan.forEach(x => {
+      const maxId = res.out.reduce((m, y) => Math.max(m, y.id || 0), 0);
+      res.out.push({ ...x, id: maxId + 1 });
+      console.warn(`⚠️ ${k}: id çakışması (${x.id}) → yeni id ${maxId + 1}`);
+    });
+    out[k] = res.out;
+  }
+  keys.forEach(k => {
+    const v = stable(local[k]) !== stable(base[k]) ? local[k] : remote[k];
+    if (v !== undefined) out[k] = v;
+  });
+  out.nextId = { ...(remote.nextId || {}), ...(local.nextId || {}) };
+  for (const nk of Object.keys(out.nextId)) out.nextId[nk] = Math.max((local.nextId || {})[nk] || 1, (remote.nextId || {})[nk] || 1);
+  for (const [k, nk] of Object.entries(DIZI_ALANLAR)) {
+    const maxId = (out[k] || []).reduce((m, x) => Math.max(m, typeof x.id === 'number' ? x.id : 0), 0);
+    out.nextId[nk] = Math.max(out.nextId[nk] || 1, maxId + 1);
+  }
+  return out;
+}
+
 async function setVeri(data) {
-  await db.collection('users').doc(CONFIG.USER_UID).collection('data').doc('psrental').set(data);
+  const baseStr = okunanHal.get(data);
+  const yerel = JSON.parse(JSON.stringify(data));
+  let yazilan = null;
+  await db.runTransaction(async tx => {
+    const snap = await tx.get(veriRef());
+    const remote = snap.exists ? snap.data() : null;
+    yazilan = baseStr ? merge3(JSON.parse(baseStr), yerel, remote) : yerel;
+    tx.set(veriRef(), yazilan);
+  });
+  // Çağıranın elindeki obje de güncel (birleştirilmiş) hale gelsin; aynı obje ile tekrar setVeri
+  // çağrılırsa sitenin yaptığı değişiklikleri geri almasın
+  const kopya = JSON.parse(JSON.stringify(yazilan));
+  Object.keys(data).forEach(k => { delete data[k]; });
+  Object.assign(data, kopya);
+  okunanHal.set(data, JSON.stringify(yazilan));
 }
 
 // ── YARDIMCI ──
-function bugun() { return new Date().toISOString().split('T')[0]; }
-function yarinStr() { const d = new Date(); d.setDate(d.getDate()+1); return d.toISOString().split('T')[0]; }
+// Railway sunucusu UTC çalışır — tarih/saat her zaman İstanbul saatine göre hesaplanır
+// (eskiden 00:00-03:00 arası "bugün" dün görünüyordu, bildirim saatleri de 3 saat kaymıştı)
+const TZ = 'Europe/Istanbul';
+function bugun(d = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+function trSaat(d = new Date()) {
+  return parseInt(new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', hour12: false }).format(d), 10) % 24;
+}
+function yarinStr() { return tarihEkle(bugun(), 1); }
+
+// Türkçe büyük/küçük harf + noktalama sorunsuz karşılaştırma için metni sadeleştir:
+// "İptal", "IPTAL", "iptal.", "İPTAL 🙏" → "iptal" · "Hayır" → "hayir" · "2️⃣" → "2"
+// (JS'in toLowerCase'i "İ" harfini "i̇" yapıyordu, bu yüzden "İptal" tanınmıyordu)
+function sadeKomut(s) {
+  return String(s || '')
+    .replace(/İ/g, 'i').replace(/I/g, 'ı')
+    .toLocaleLowerCase('tr-TR').replace(/\u0307/g, '')
+    .replace(/ı/g, 'i').replace(/ğ/g, 'g').replace(/ü/g, 'u').replace(/ş/g, 's').replace(/ö/g, 'o').replace(/ç/g, 'c')
+    .replace(/â/g, 'a').replace(/î/g, 'i').replace(/û/g, 'u')
+    .replace(/[^a-z0-9#\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+const EVET = ['evet', 'e', 'evt', 'tamam', 'onay', 'onayla', 'onayliyorum', 'ok', 'olur', 'evet onayliyorum'];
+const HAYIR = ['hayir', 'h', 'yok', 'istemiyorum', 'hayir istemiyorum'];
+const IPTAL_KELIMELERI = ['iptal', '#iptal', 'vazgec', 'vazgectim', 'geri', 'iptal et', 'cik', 'menu', 'ana menu', 'menuye don', '0'];
+const MENU_METNI = `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle`;
+function telSon10(t) { return String(t || '').replace(/[^0-9]/g, '').replace(/^90/, '').replace(/^0/, '').slice(-10); }
+// Site ile aynı hediye mantığı: çıkışı (veya ilk kiralaması) 1 aydan eski oyunlar "eski oyun" sayılır
+function eskiOyunMu(oyun, veri) {
+  if (!oyun) return false;
+  const birAyOnce = tarihEkle(bugun(), -30);
+  if (oyun.cikis && oyun.cikis <= bugun()) return oyun.cikis < birAyOnce;
+  const ilk = (veri.kiralamalar || []).filter(k => k.oyunId === oyun.id).map(k => k.bas).sort()[0];
+  return !!ilk && ilk < birAyOnce;
+}
 function gunFarki(d1, d2) { return Math.round((new Date(d2) - new Date(d1)) / 86400000); }
 function fmt(n) { return '₺' + (n||0).toLocaleString('tr-TR'); }
 function fmtTarih(t) { if(!t) return '?'; const [y,m,d]=t.split('-'); return `${d}.${m}.${y}`; }
@@ -71,10 +187,32 @@ function tarihEkle(bas, gun) {
   d.setDate(d.getDate() + gun);
   return d.toISOString().split('T')[0];
 }
+// Kiralama tipine göre boş slotu olan hesap: 0 = ana hesap, 1.. = kopyalar (site ile aynı numaralama)
+function bosKopyaBul(oyun, tip, veri) {
+  if (!oyun) return 0;
+  const slotlar = [{ idx: 0, cift: !!oyun.ciftPrimary }];
+  (oyun.kopyalar || []).forEach((k, i) => { if (!k.satildi) slotlar.push({ idx: i + 1, cift: !!k.ciftPrimary }); });
+  for (const s of slotlar) {
+    const kap = tip === 'primary' ? (s.cift ? 2 : 1) : 1;
+    const dolu = veri.kiralamalar.filter(k => k.oyunId === oyun.id && k.durum === 'aktif' && k.tip === tip && (k.kopyaIdx || 0) === s.idx).length;
+    if (dolu < kap) return s.idx;
+  }
+  return 0;
+}
+function doluMu(oyun, tip, veri) {
+  const aktif = veri.kiralamalar.filter(k => k.oyunId === oyun.id && k.durum === 'aktif' && k.tip === tip).length;
+  return aktif >= slotKapasite(oyun, tip);
+}
+function slotKapasite(oyun, tip) {
+  const kopyalar = (oyun?.kopyalar || []).filter(k => !k.satildi);
+  return tip === 'primary'
+    ? (oyun?.ciftPrimary ? 2 : 1) + kopyalar.reduce((t, k) => t + (k.ciftPrimary ? 2 : 1), 0)
+    : 1 + kopyalar.length;
+}
 function gunlukFiyat(oyun, tip) {
   return tip === 'primary'
     ? (oyun.gunlukPri || oyun.gunluk || 0)
-    : (oyun.gunlukSec || Math.round((oyun.gunluk||0) * 0.85));
+    : (oyun.gunlukSec || Math.round((oyun.gunlukPri || oyun.gunluk || 0) * 0.7)); // site ile aynı: secondary fiyatı yoksa %70
 }
 
 // ── BEKLEYENLERİ ÇİFT KAYDET (hem lid hem tel) ──
@@ -189,63 +327,78 @@ function sssKontrol(metin, musteriAd) {
   const ad = musteriAd || 'Müşterimiz';
 
   // Çalışma saatleri
-  if (metin.includes('saat') || metin.includes('çalışma') || metin.includes('kaçta') ||
-      metin.includes('kaça kadar') || metin.includes('açık') || metin.includes('müsait')) {
+  if (metin.includes('saat') || metin.includes('calisma') || metin.includes('kacta') ||
+      metin.includes('kaca kadar') || metin.includes('acik') || metin.includes('musait')) {
     return `🕐 *Çalışma Saatleri*\n\nMerhaba ${ad}! 😊\n\nBiz 7/24 hizmetinizdeyiz! Gece gündüz her saatte mesaj atabilirsiniz, bot size yardımcı olacaktır.\n\nİşletmecimize ulaşmak istiyorsanız da mesajınızı bırakın, en kısa sürede dönüş yapılır 🙏`;
   }
 
   // Nasıl kiralıyorum
-  if (metin.includes('nasıl kirala') || metin.includes('kiralama süreci') || metin.includes('nasıl çalış') ||
-      metin.includes('ne yapacağım') || metin.includes('ne yapmalı') || metin.includes('ilk kez')) {
+  if (metin.includes('nasil kirala') || metin.includes('kiralama sureci') || metin.includes('nasil calis') ||
+      metin.includes('ne yapacagim') || metin.includes('ne yapmali') || metin.includes('ilk kez')) {
     return `🎮 *Kiralama Süreci*\n\nMerhaba ${ad}! Çok basit:\n\n*1️⃣* Menüden *5* yazarak oyun listesini gör\n*2️⃣* Beğendiğin oyunu ve kaç gün istediğini söyle\n*3️⃣* IBAN bilgisi sana gönderilir, ödemeyi yap\n*4️⃣* Dekontu buraya gönder\n*5️⃣* Hesabına erişim bilgileri iletilir ✅\n\nHerhangi bir adımda takılırsan yardımcı oluruz 😊`;
   }
 
   // Ödeme yöntemleri
-  if (metin.includes('ödeme') || metin.includes('iban') || metin.includes('havale') ||
-      metin.includes('eft') || metin.includes('para') || metin.includes('nasıl öde')) {
+  if (metin.includes('odeme') || metin.includes('iban') || metin.includes('havale') ||
+      metin.includes('eft') || metin.includes('para') || metin.includes('nasil ode')) {
     return `💳 *Ödeme Yöntemleri*\n\nŞu an ödeme *banka havalesi / EFT* ile yapılmaktadır.\n\nIBAN bilgisi için *5* yazarak kiralama başlatın, otomatik olarak gönderilecektir.\n\nÖdeme sonrası dekontu bu sohbete iletin, hemen işleme alınır ✅`;
   }
 
   // İade
-  if ((metin.includes('iade') && !metin.includes('nasıl')) || metin.includes('teslim') ||
+  if ((metin.includes('iade') && !metin.includes('nasil')) || metin.includes('teslim') ||
       metin.includes('geri ver') || metin.includes('bitir')) {
     return `📦 *İade Süreci*\n\nMerhaba ${ad}!\n\nİade için menüden *3* yazmanız yeterli 😊\n\nOyunu bitirdiğinizde bildirim gönderirsiniz, hesap erişimi tarafımızdan sonlandırılır.\n\n⚠️ Hesabı kendiniz çıkmayın, iade bildirimi yapmadan çıkış yapmak sorun oluşturabilir.`;
   }
 
   // Gecikme / geç iade
-  if (metin.includes('gecik') || metin.includes('geç kald') || metin.includes('uzatsam') ||
-      metin.includes('süre doldu') || metin.includes('sürem doldu') || metin.includes('süresi geçt')) {
+  if (metin.includes('gecik') || metin.includes('gec kald') || metin.includes('uzatsam') ||
+      metin.includes('sure doldu') || metin.includes('surem doldu') || metin.includes('suresi gect')) {
     return `⏰ *Gecikme Politikası*\n\nMerhaba ${ad}!\n\nİlk gecikmede ek ücret uygulanmaz, anlayışla karşılarız 😊\n\nAncak tekrarlayan gecikmelerde müşteri güven skorunuza göre günlük ek ücret uygulanabilir (₺3 → ₺5 → ₺7 şeklinde artan).\n\nSkorunuz düşerse kara listeye alınabilir ve ileriki kiralamalarda ön ödeme şartı getirilebilir.\n\nEn iyisi uzatma gerekirse önceden *2* yazarak bilgi vermek 🙏`;
   }
 
   // Kara liste
-  if (metin.includes('kara liste') || metin.includes('karalist') || metin.includes('yasaklı') ||
+  if (metin.includes('kara liste') || metin.includes('karalist') || metin.includes('yasakli') ||
       metin.includes('engellenm')) {
     return `🚫 *Kara Liste*\n\nKara liste; gecikmeli iade, ödeme sorunları veya hesap ihlali gibi durumlarda uygulanır.\n\nKara listede olan müşterilerimiz yeni kiralama yapamaz.\n\nHerhangi bir sorun yaşadıysanız doğrudan işletmeci ile iletişime geçin, çözüme kavuşturalım 🙏`;
   }
 
   // Fiyat soru
-  if (metin.includes('fiyat') || metin.includes('kaç para') || metin.includes('ne kadar') ||
-      metin.includes('ücret') || metin.includes('kaça')) {
+  if (metin.includes('fiyat') || metin.includes('kac para') || metin.includes('ne kadar') ||
+      metin.includes('ucret') || metin.includes('kaca')) {
     return `💰 *Fiyatlar*\n\nMerhaba ${ad}!\n\nFiyatlar oyuna ve kiralama tipine göre değişiyor:\n\n🔵 *Primary* — oyunu ana hesaptan oynarsın, tam deneyim\n🟣 *Secondary* — daha uygun fiyatlı seçenek\n\nGüncel fiyatları görmek için *4* yazarak oyun listesine bakabilirsin 🎮`;
   }
 
   // Primary / Secondary ne demek
-  if (metin.includes('primary ne') || metin.includes('secondary ne') || metin.includes('primary mı') ||
-      metin.includes('secondary mı') || metin.includes('fark ne') || metin.includes('fark nedir')) {
+  if (metin.includes('primary ne') || metin.includes('secondary ne') || metin.includes('primary mi') ||
+      metin.includes('secondary mi') || metin.includes('fark ne') || metin.includes('fark nedir')) {
     return `🎮 *Primary & Secondary Farkı*\n\n🔵 *Primary (Ana Hesap)*\nOyunu hesabın ana kullanıcısı olarak oynarsın. Tam erişim, çevrimiçi özellikler dahil. Biraz daha pahalı.\n\n🟣 *Secondary (İkinci Kullanıcı)*\nOyunu kendi PS hesabında oynarsın, daha uygun fiyatlı. Çevrimiçi özellikler için PS Plus gerekmeyebilir.\n\nHer ikisi de sorunsuz çalışır, bütçene göre seçebilirsin 😊`;
   }
 
   return null; // SSS eşleşmedi, Claude'a git
 }
 
+// Botun kendi gönderdiği mesajlar — Waha bunları da "fromMe" olarak webhook'a geri gönderiyor.
+// Eskiden bot kendi mesajını "işletmeci yazdı" sanıp müşteriyi 8 saat susturuyordu (2/3'e tepki vermeme sebebi).
+const botunMesajlari = new Map(); // metin parmak izi / mesaj id → zaman
+function parmakIzi(metin) { return String(metin || '').trim().slice(0, 200); }
+function botunMesajiMi(msg) {
+  if (msg.source === 'api') return true; // Yeni Waha sürümleri API'den gidenleri işaretliyor
+  const simdi = Date.now();
+  for (const [k, t] of botunMesajlari) if (simdi - t > 5 * 60 * 1000) botunMesajlari.delete(k);
+  if (msg.id && (botunMesajlari.has('id:' + msg.id) || botunMesajlari.has('id:' + (msg.id.id || '')))) return true;
+  return botunMesajlari.has('txt:' + parmakIzi(msg.body));
+}
+
 async function mesajGonder(tel, metin) {
   try {
     const chatId = tel.includes('@') ? tel : tel + '@c.us';
-    await axios.post(`${CONFIG.WAHA_URL}/api/sendText`,
+    botunMesajlari.set('txt:' + parmakIzi(metin), Date.now());
+    const yanit = await axios.post(`${CONFIG.WAHA_URL}/api/sendText`,
       { session: 'default', chatId, text: metin },
       { headers: CONFIG.WAHA_API_KEY ? { 'X-Api-Key': CONFIG.WAHA_API_KEY } : {} }
     );
+    const gidenId = yanit?.data?.id;
+    if (gidenId) botunMesajlari.set('id:' + (typeof gidenId === 'object' ? (gidenId._serialized || gidenId.id) : gidenId), Date.now());
     console.log(`📤 → ${chatId.slice(0,20)}`);
     // Benim numaram değilse, bu kişiyi son mesaj gönderilenler listesine ekle
     const benim9 = (CONFIG.BENIM_NUMARAM || '').replace(/[^0-9]/g,'').slice(-9);
@@ -265,7 +418,39 @@ async function banaGonder(metin) {
 //         yeni_kiralama_dekont | yeni_kiralama_bekle
 //         uzatma_gun_bekle | uzatma_dekont | uzatma_isletmeci_bekle
 //         iade_onay
-const bekleyenOnaylar = new Map();
+// Bekleyen işlemler artık zaman aşımına uğrar: eskiden yarım kalan bir işlem (ör. dekont bekleme)
+// günlerce kalıyor, müşteri ne yazarsa yazsın aynı mesajı alıyordu.
+const STATE_SURESI = {
+  varsayilan: 12 * 60 * 60 * 1000,              // 12 saat
+  yeni_kiralama_bekle: 3 * 24 * 60 * 60 * 1000,  // işletmeci onayı bekleniyor
+  uzatma_isletmeci_bekle: 3 * 24 * 60 * 60 * 1000,
+  qr_bekle: 2 * 24 * 60 * 60 * 1000,
+  qr_onay_bekle: 2 * 24 * 60 * 60 * 1000,
+  bildirim_secim: 2 * 24 * 60 * 60 * 1000,
+};
+// İşletmeci onayı bekleyen işlemler (ödeme yapılmış). Müşteri bu arada başka bir menüye geçerse
+// bu kayıt kaybolmasın diye ayrı tutulur — #onayla her iki yerde de arar.
+const ONAY_TIPLERI = ['yeni_kiralama_bekle', 'uzatma_isletmeci_bekle', 'qr_onay_bekle'];
+const onayBekleyenler = new Map();
+class SureliMap extends Map {
+  set(k, v) {
+    const mevcut = super.get(k);
+    if (mevcut && ONAY_TIPLERI.includes(mevcut.tip) && !(v && ONAY_TIPLERI.includes(v.tip)) && !(v && v.tip === 'qr_bekle')) {
+      onayBekleyenler.set(k, mevcut); // üzerine yazılmadan önce kenara al
+    }
+    return super.set(k, v && typeof v === 'object' ? { ...v, _ts: Date.now() } : v);
+  }
+  get(k) {
+    const v = super.get(k);
+    if (v && v._ts) {
+      const sure = STATE_SURESI[v.tip] || STATE_SURESI.varsayilan;
+      if (Date.now() - v._ts > sure) { super.delete(k); return undefined; }
+    }
+    return v;
+  }
+  has(k) { return this.get(k) !== undefined; }
+}
+const bekleyenOnaylar = new SureliMap();
 const insanDevraldi = new Map();
 const sonMenuGonderilen = new Map(); // Menü spam önleme
 const BAKIYE_BILGI = `ℹ️ *Bakiye Hakkında:*
@@ -317,6 +502,30 @@ let benimLid = process.env.BENIM_LID || null;
 // İlk mesajda otomatik öğren
 
 
+// Dosya/fotoğraf beklenen adımlarda müşteri yazı yazarsa aynı uyarı her mesajda tekrar gitmesin:
+// en fazla 3 dakikada bir hatırlat, arada yazılanlar normal akışa (menü/SSS) düşsün.
+const sonHatirlatma = new Map();
+function hatirlatmaZamaniMi(tel, dk = 3) {
+  const t = sonHatirlatma.get(tel) || 0;
+  if (Date.now() - t < dk * 60 * 1000) return false;
+  sonHatirlatma.set(tel, Date.now());
+  return true;
+}
+// Adımda geçersiz cevap: en fazla 2 kez tekrar sorar, 3.'de işlemi iptal edip menüyü gösterir
+// (eskiden müşteri ne yazarsa yazsın aynı uyarı sonsuza kadar tekrar ediyordu)
+async function gecersizCevap(tel, mesaj) {
+  const b = bekleyenOnaylar.get(tel);
+  const deneme = ((b && b._hata) || 0) + 1;
+  if (!b || deneme >= 3) {
+    bekleyenOnaylar.delete(tel);
+    await mesajGonder(tel, `🤔 Anlayamadım, bu işlemi iptal ettim.\n\nBaşka ne yapmak istersiniz?\n\n${MENU_METNI}`);
+    return;
+  }
+  bekleyenOnaylar.set(tel, { ...b, _hata: deneme });
+  await mesajGonder(tel, mesaj + `\n\n_(Vazgeçmek için *iptal* yazabilirsiniz)_`);
+}
+const menuSecimiMi = m => /^[1-9]$/.test(m) || ['merhaba', 'selam', 'menu', 'ana menu'].includes(m);
+
 // ── RESET KOMUTU için tüm state temizle ──
 function stateTemizle(tel) {
   bekleyenOnaylar.delete(tel);
@@ -339,10 +548,59 @@ function medyaVarMi(msg) {
 // ── ANA WEBHOOK ──
 const islenenMesajlar = new Set(); // duplicate koruması
 
-app.post('/webhook', async (req, res) => {
+// Aynı kişiden art arda gelen mesajlar sırayla işlenir (eskiden paralel işleniyor, durum karışıp
+// aynı mesaj iki kez gidebiliyordu)
+const sohbetKuyrugu = new Map();
+function kuyrugaEkle(anahtar, is) {
+  const onceki = sohbetKuyrugu.get(anahtar) || Promise.resolve();
+  const yeni = onceki.then(is, is).finally(() => { if (sohbetKuyrugu.get(anahtar) === yeni) sohbetKuyrugu.delete(anahtar); });
+  sohbetKuyrugu.set(anahtar, yeni);
+  return yeni;
+}
+app.post('/webhook', (req, res) => {
   res.sendStatus(200);
+  const event = req.body || {};
+  const p = event.payload || {};
+  const anahtar = (p.fromMe ? p.to : p.from) || 'genel';
+  kuyrugaEkle(anahtar, () => webhookIsle(event));
+});
+
+// İşletmecinin müşteriye elle yazdığı mesaj botu susturur. AMA mesajda 🤖 varsa veya
+// "2 / 3 yazın" şeklinde menü seçeneği veriyorsa (ör. siteden gönderilen süre doluyor bildirimi)
+// bot susturulmaz ve müşterinin 2/3 cevabını bot karşılar.
+function botaDevredenMesajMi(body) {
+  if (/🤖/.test(body)) return true;
+  const sade = sadeKomut(body);
+  const kelimeler = new Set(sade.split(' '));
+  return kelimeler.has('2') && kelimeler.has('3') && sade.includes('yaz');
+}
+async function musteriBulChat(veri, chatId) {
+  const sade = String(chatId || '').replace(/[^0-9]/g, '');
+  return veri.musteriler.find(m => m.whatsappLid && m.whatsappLid === chatId)
+    || veri.musteriler.find(m => (m.whatsappLid || '').replace(/[^0-9]/g, '') === sade && sade.length > 5)
+    || (chatId.includes('@lid') ? null : veri.musteriler.find(m => telSon10(m.tel).length === 10 && telSon10(m.tel) === telSon10(sade)));
+}
+async function bildirimDurumuKur(chatId) {
   try {
-    const event = req.body;
+    const veri = await getVeri(); if (!veri) return;
+    const m = await musteriBulChat(veri, chatId);
+    if (!m) return;
+    const aktif = veri.kiralamalar.filter(k => k.musteriId === m.id && k.durum === 'aktif').sort((a, b) => a.bit.localeCompare(b.bit));
+    if (!aktif.length) return;
+    const k = aktif[0];
+    const o = veri.oyunlar.find(x => x.id === k.oyunId);
+    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: k.id, musteriId: m.id, gunluk: gunlukFiyat(o || {}, k.tip) });
+    // Bu müşteri için önceki susturmaları kaldır
+    const anahtarlar = [chatId, m.whatsappLid, temizTel(m.tel || '') + '@c.us'].filter(Boolean);
+    for (const [key] of insanDevraldi) {
+      if (anahtarlar.includes(key) || key.replace(/[^0-9]/g, '').endsWith(telSon10(m.tel).slice(-9) || '_yok_')) insanDevraldi.delete(key);
+    }
+    console.log(`🤖 İşletmeci bildirimi → bot devrede: ${chatId} (kira #${k.id})`);
+  } catch (e) { console.error('bildirimDurumuKur hatası:', e.message); }
+}
+
+async function webhookIsle(event) {
+  try {
     const msg = event.payload;
     if (!msg) return;
 
@@ -350,7 +608,12 @@ app.post('/webhook', async (req, res) => {
     const fromMeEvent = (event.event === 'message.any' || event.event === 'message') && msg.fromMe && msg.to;
     if (fromMeEvent) {
       const body = (msg.body || '').trim();
+      if (botunMesajiMi(msg)) return; // botun kendi gönderdiği mesaj — kimseyi susturma
       console.log(`📤 fromMe event: ${event.event} | to: ${msg.to} | body: "${body.slice(0,30)}"`);
+      const benim9 = (CONFIG.BENIM_NUMARAM || '').replace(/[^0-9]/g,'').slice(-9);
+      const kendimeMi = (benim9 && msg.to.replace(/[^0-9]/g,'').endsWith(benim9)) || msg.to === benimLid || msg.to === process.env.BENIM_LID;
+      if (kendimeMi) return; // kendi sohbetime yazdığım komutlar
+      if (botaDevredenMesajMi(body)) { await bildirimDurumuKur(msg.to); return; }
       if (!body.startsWith('#')) {
         const sade9 = msg.to.replace(/[^0-9]/g,'').slice(-9);
         insanDevraldi.set(msg.to, Date.now());
@@ -377,7 +640,7 @@ app.post('/webhook', async (req, res) => {
 
     const tel = msg.from;
     if (!tel) return;
-    const metin = (msg.body || '').trim().toLowerCase();
+    const metin = sadeKomut(msg.body); // Türkçe harf/büyük harf/noktalama bağımsız (İptal = iptal = IPTAL)
     const metinOrijinal = (msg.body || '').trim();
     const medya = medyaVarMi(msg);
 
@@ -624,8 +887,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         try {
           const veriDurum = await getVeri();
           const bugunStr = bugun();
-          const yarinDate = new Date(); yarinDate.setDate(yarinDate.getDate()+1);
-          const yarinStr2 = yarinDate.toISOString().split('T')[0];
+          const yarinStr2 = yarinStr();
           const aktifler = veriDurum.kiralamalar.filter(k => k.durum === 'aktif');
           const bugunBitenler = aktifler.filter(k => k.bit === bugunStr);
           const yarinBitenler = aktifler.filter(k => k.bit === yarinStr2);
@@ -709,7 +971,10 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           if (!veriKara.karaListe) veriKara.karaListe = [];
           const zatenVar = veriKara.karaListe.some(k => k.musteriId === mKara.id);
           if (zatenVar) { await banaGonder(`⚠️ ${mKara.ad} ${mKara.soyad} zaten kara listede`); return; }
-          veriKara.karaListe.push({ musteriId: mKara.id, sebep, tarih: bugun() });
+          if (!veriKara.nextId) veriKara.nextId = {};
+          const klId = Math.max(veriKara.nextId.kl || 1, ...veriKara.karaListe.map(k => (k.id || 0) + 1));
+          veriKara.nextId.kl = klId + 1;
+          veriKara.karaListe.push({ id: klId, musteriId: mKara.id, sebep, tarih: bugun() });
           await setVeri(veriKara);
           await banaGonder(`🚫 Kara listeye eklendi:\n👤 ${mKara.ad} ${mKara.soyad}\n📱 ${mKara.tel}\n📝 Sebep: ${sebep}`);
           // Müşteriye bildirim gitsin mi?
@@ -724,7 +989,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       }
 
       // #karaaç 905xxx — kara listeden çıkar
-      if (metin.startsWith('#karaac') || metin.startsWith('#kara-ac') || metin.startsWith('#kara aç')) {
+      if (metin.startsWith('#karaac') || metin.startsWith('#kara ac') || metin.startsWith('#kara ac')) {
         const hedefNumara = metinOrijinal.split(' ')[1]?.replace(/[^0-9]/g,'');
         if (hedefNumara) {
           const veriKaraAc = await getVeri();
@@ -747,7 +1012,13 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           const veriT = await getVeri();
           const mT = veriT.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').slice(-10) === sade || (m.whatsappLid||'').includes(sade));
           const hedefKey = mT?.whatsappLid || (sade + '@c.us');
-          const bekleyenT = bekleyenOnaylar.get(hedefKey) || bekleyenOnaylar.get('90'+sade+'@c.us') || bekleyenOnaylar.get(sade+'@c.us');
+          const qrTipi = v => v && (v.tip === 'qr_bekle' || v.tip === 'qr_onay_bekle');
+          const qrKeys = [hedefKey, '90'+sade+'@c.us', sade+'@c.us'];
+          let bekleyenT = null, qrKey = null, qrKaynak = null;
+          for (const kaynak of [bekleyenOnaylar, onayBekleyenler]) {
+            for (const k of qrKeys) { const v = kaynak.get(k); if (qrTipi(v)) { bekleyenT = v; qrKey = k; qrKaynak = kaynak; break; } }
+            if (bekleyenT) break;
+          }
           const oyunAd = bekleyenT?.oyunAd || '?';
           // Müşteriye bildirim
           await mesajGonder(hedefKey,
@@ -756,7 +1027,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             `İyi oyunlar! 🎮🎉\n\n` +
             `Süreniz bittiğinde veya uzatmak istediğinizde menüden işlem yapabilirsiniz.`
           );
-          bekleyenOnaylar.delete(hedefKey);
+          if (qrKaynak) qrKaynak.delete(qrKey);
           await banaGonder(`✅ Giriş tamamlandı: ${mT?.ad||sade} — ${oyunAd}`);
         } else {
           await banaGonder('Kullanım: #tamam 905xxxxxxxxx');
@@ -777,21 +1048,34 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         ];
         let hedefKey = null;
         let hedefBekleyen = null;
-        for (const k of araKeys) {
-          if (bekleyenOnaylar.has(k)) { hedefKey = k; hedefBekleyen = bekleyenOnaylar.get(k); break; }
+        let hedefKaynak = null; // hangi map'te bulundu
+        const onayTipiMi = v => v && (v.tip === 'yeni_kiralama_bekle' || v.tip === 'uzatma_isletmeci_bekle');
+        const kaynaklar = [bekleyenOnaylar, onayBekleyenler];
+        // Numara '90' ile veya '90'sız yazılabilir — iki biçimi de dene
+        araKeys.push('90' + hedefSade + '@c.us', hedefSade + '@c.us');
+        for (const kaynak of kaynaklar) {
+          for (const k of araKeys) {
+            const v = kaynak.get(k);
+            if (onayTipiMi(v)) { hedefKey = k; hedefBekleyen = v; hedefKaynak = kaynak; break; }
+          }
+          if (hedefBekleyen) break;
         }
 
-        // 2) Bulunamazsa tüm bekleyenler arasında müşteri telefonu ile eşleştir
+        // 2) Bulunamazsa tüm bekleyenler arasında müşteri telefonu ile eşleştir (LID ile yazan müşteriler)
         if (!hedefBekleyen) {
           const veriAra = await getVeri();
-          for (const [key, val] of bekleyenOnaylar.entries()) {
-            if (!val.musteriId) continue;
-            const m = veriAra.musteriler.find(x => x.id === val.musteriId);
-            if (!m) continue;
-            const mTel = (m.tel||'').replace(/[^0-9]/g,'').replace(/^0/,'').replace(/^90/,'');
-            if (mTel === hedefSade) { hedefKey = key; hedefBekleyen = val; break; }
+          for (const kaynak of kaynaklar) {
+            for (const [key, val] of kaynak.entries()) {
+              if (!onayTipiMi(val)) continue;
+              const mId = val.musteriId || veriAra.kiralamalar.find(x => x.id === val.kiraId)?.musteriId;
+              const m = veriAra.musteriler.find(x => x.id === mId);
+              if (!m) continue;
+              if (telSon10(m.tel) === telSon10(hedefSade)) { hedefKey = key; hedefBekleyen = val; hedefKaynak = kaynak; break; }
+            }
+            if (hedefBekleyen) break;
           }
         }
+        const onayKaydiniSil = () => { if (hedefKaynak) hedefKaynak.delete(hedefKey); onayBekleyenler.delete(hedefKey); };
 
         if (!hedefBekleyen) { await banaGonder(`Bekleyen işlem yok: ${hedefTel}`); return; }
         const veri2 = await getVeri();
@@ -806,11 +1090,14 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           const hediyeGun = hedefBekleyen.hediye || 0;
           // Tier kontrolü — ÖNCE (kiralama eklenmeden)
           const tierOncesi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
+          // Boş slotu olan kopyaya ata (eskiden hep ana hesaba yazılıyordu, kopyalı oyunlarda çakışma oluyordu)
+          const kopyaIdx = bosKopyaBul(veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId), hedefBekleyen.kiraTip, veri2);
           veri2.kiralamalar.push({
             id: yeniId, oyunId: hedefBekleyen.oyunId, musteriId: hedefBekleyen.musteriId,
             tip: hedefBekleyen.kiraTip, bas, bit,
             ucret: (hedefBekleyen.ucret + (hedefBekleyen.indirim||0)), indirim: (hedefBekleyen.indirim||0), net: hedefBekleyen.ucret,
             onOdeme: hedefBekleyen.ucret, hediyeGun, notlar: 'Bot ile eklendi', durum: 'aktif',
+            kopyaIdx, odemeTip: hedefBekleyen.odemeTip || 'havale', // bakiye ile ödenenler tier'da çift sayılmasın
           });
           if (!veri2.nextId) veri2.nextId = {};
           veri2.nextId.k = yeniId + 1; // Sonraki için +1 kaydet
@@ -822,7 +1109,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             oyunStat.durum = 'kirada';
           }
           await setVeri(veri2);
-          bekleyenOnaylar.delete(hedefKey);
+          onayKaydiniSil();
           // Tier kontrolü — SONRA
           const tierSonrasi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
           const tierAtladi = tierOncesi.seviye !== tierSonrasi.seviye;
@@ -879,7 +1166,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               oyunStatUzat.toplamGelir = (oyunStatUzat.toplamGelir || 0) + hedefBekleyen.ucret;
             }
             await setVeri(veri2);
-            bekleyenOnaylar.delete(hedefKey);
+            onayKaydiniSil();
             const tierSonrasi = getMusteriTierBot(k.musteriId, veri2);
             const tierAtladi = tierOncesi.seviye !== tierSonrasi.seviye;
             let uzatmaMesaj = `✅ Uzatma onaylandı! ${hedefBekleyen.gun} gün eklendi.\nYeni bitiş: *${k.bit}* 🎮`;
@@ -929,22 +1216,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     const isLid = tel.includes('@lid');
     let musteri = veri.musteriler.find(m => m.whatsappLid === tel);
 
-    // ── KARA LİSTE KONTROLÜ ──
-    if (musteri && (veri.karaListe||[]).some(k => k.musteriId === musteri.id)) {
-      const sonKara = sonMenuGonderilen.get('kara_' + tel) || 0;
-      if (Date.now() - sonKara > 24 * 60 * 60 * 1000) {
-        sonMenuGonderilen.set('kara_' + tel, Date.now());
-        await mesajGonder(tel, `🚫 Hesabınız askıya alınmıştır.\nDetay için işletmecimizle iletişime geçin.`);
-      }
-      return;
-    }
     if (!musteri && !isLid) {
       const sade = tel.replace('@c.us','').replace(/^90/,'').replace(/^0/,'');
-      musteri = veri.musteriler.find(m => {
-        if (!m.tel) return false;
-        const mSade = m.tel.replace(/[^0-9]/g,'').replace(/^90/,'').replace(/^0/,'');
-        return mSade === sade || mSade.endsWith(sade) || sade.endsWith(mSade);
-      });
+      // Son 10 hane birebir eşleşmeli (eskiden kısa/hatalı kayıtlı numaralar yanlış müşteriyle eşleşebiliyordu)
+      const sade10 = telSon10(sade);
+      musteri = sade10.length === 10 ? veri.musteriler.find(m => telSon10(m.tel).length === 10 && telSon10(m.tel) === sade10) : null;
     }
     // LID ile geldi ama whatsappLid kayıtlı değil → telefon numarasıyla da ara
     if (!musteri && isLid) {
@@ -957,19 +1233,45 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       try { await setVeri(veri); } catch(e) {}
     }
 
+    // ── KARA LİSTE KONTROLÜ ── (artık telefonla bulunan müşteriler için de çalışır)
+    if (musteri && (veri.karaListe||[]).some(k => k.musteriId === musteri.id)) {
+      const sonKara = sonMenuGonderilen.get('kara_' + tel) || 0;
+      if (Date.now() - sonKara > 24 * 60 * 60 * 1000) {
+        sonMenuGonderilen.set('kara_' + tel, Date.now());
+        await mesajGonder(tel, `🚫 Hesabınız askıya alınmıştır.\nDetay için işletmecimizle iletişime geçin.`);
+      }
+      return;
+    }
+
     const musteriAd = musteri ? ((musteri.ad||'') + ' ' + (musteri.soyad||'')).trim() || musteri.tel || 'Müşteri' : 'Misafir';
     const aktifKiralar = musteri ? veri.kiralamalar.filter(k => k.musteriId === musteri.id && k.durum === 'aktif') : [];
     const aktifKira = aktifKiralar[0] || null;
 
 
-    // ── GENEL İPTAL — herhangi bir state'deyken "iptal" yazarsa menüye dön ──
+    // Durum başka bir anahtarla (LID ↔ telefon) kaydedildiyse bu sohbete taşı
+    // (bildirim telefona gidip müşteri LID'den cevap verince 2/3 tanınmıyordu)
+    if (musteri && !bekleyenOnaylar.has(tel)) {
+      const alternatifler = [musteri.whatsappLid, musteri.tel ? temizTel(musteri.tel) + '@c.us' : null].filter(k => k && k !== tel);
+      for (const k of alternatifler) {
+        const v = bekleyenOnaylar.get(k);
+        if (v) { bekleyenOnaylar.set(tel, v); bekleyenOnaylar.delete(k); break; }
+      }
+    }
+
+    // ── GENEL İPTAL — herhangi bir adımda "iptal / vazgeç / geri / menü / 0" yazılırsa menüye dön ──
     const bekleyenKontrol = bekleyenOnaylar.get(tel);
-    if (bekleyenKontrol && (metin === 'iptal' || metin === 'vazgeç' || metin === 'vazgec' || metin === 'geri')) {
+    if (bekleyenKontrol && IPTAL_KELIMELERI.includes(metin)) {
+      if (ONAY_TIPLERI.includes(bekleyenKontrol.tip)) {
+        // Ödeme yapılmış, işletmeci onayı bekleniyor — kaydı silme, sadece bilgi ver
+        await mesajGonder(tel, `⏳ Ödemeniz işletmeci onayı bekliyor, kaydınız duruyor.\n\nBu işlemi iptal etmek isterseniz *7* yazarak yetkiliyle görüşebilirsiniz.\n\n${MENU_METNI}`);
+        return;
+      }
       bekleyenOnaylar.delete(tel);
-      await mesajGonder(tel,
-        `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
-        `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle`
-      );
+      if (!musteri) {
+        await mesajGonder(tel, `İptal edildi 😊 Tekrar başlamak için herhangi bir mesaj yazabilirsiniz.`);
+        return;
+      }
+      await mesajGonder(tel, `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n${MENU_METNI}`);
       return;
     }
 
@@ -978,7 +1280,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     if (bekleyen?.tip === 'telefon_bekle') {
       const numara = metinOrijinal.replace(/[^0-9]/g,'').replace(/^90/,'').replace(/^0/,'');
       if (numara.length >= 10) {
-        const bulunan = veri.musteriler.find(m => m.tel && m.tel.replace(/[^0-9]/g,'').replace(/^0/,'') === numara);
+        const bulunan = veri.musteriler.find(m => telSon10(m.tel).length === 10 && telSon10(m.tel) === numara.slice(-10));
         bekleyenOnaylar.delete(tel);
         if (bulunan) {
           bulunan.whatsappLid = tel;
@@ -1014,15 +1316,14 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           `İşlem tamamlandığında bildirim alacaksınız.`
         );
         bekleyenOnaylar.delete(tel);
-      } else if (metin === 'iptal') {
-        bekleyenOnaylar.delete(tel);
-        await mesajGonder(tel, `❌ Bakiye yükleme iptal edildi.`);
-      } else {
+        return;
+      } else if (!menuSecimiMi(metin) && hatirlatmaZamaniMi(tel)) {
         await mesajGonder(tel,
-          `📸 Lütfen havale dekontunu fotoğraf veya PDF olarak gönderin.\n\n❌ İptal için *iptal* yazın.`
+          `📸 Lütfen havale dekontunu fotoğraf veya PDF olarak gönderin.\n\n❌ Vazgeçmek için *iptal* yazın.`
         );
+        return;
       }
-      return;
+      // menü seçimi veya başka bir soru → normal akışa devam
     }
 
     // QR bekleme — musteri null olsa bile devam et
@@ -1041,23 +1342,26 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         try {
           await axios.post(`${CONFIG.WAHA_URL}/api/sendImage`, {
             session: 'default',
-            chatId: CONFIG.BENIM_NUMARAM,
+            chatId: (CONFIG.BENIM_NUMARAM || '').includes('@') ? CONFIG.BENIM_NUMARAM : temizTel(CONFIG.BENIM_NUMARAM || '') + '@c.us',
             caption: `QR — ${bekleyen.musteriAd} / ${bekleyen.oyunAd}`,
-            file: { mimetype: msg.media?.mimetype || 'image/jpeg', data: msg.media?.data || '' }
+            file: msg.media?.url ? { mimetype: msg.media?.mimetype || 'image/jpeg', url: msg.media.url } : { mimetype: msg.media?.mimetype || 'image/jpeg', data: msg.media?.data || '' }
           }, { headers: { 'X-Api-Key': CONFIG.WAHA_API_KEY } });
         } catch(e) { console.log('QR görsel iletme hatası:', e.message); }
         await mesajGonder(tel, `📸 QR kodunuz alındı! Giriş işlemi tamamlanınca bildirim alacaksınız 🙏`);
         bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'qr_onay_bekle' });
-      } else {
+        return;
+      } else if (!menuSecimiMi(metin) && hatirlatmaZamaniMi(tel)) {
         await mesajGonder(tel,
           `📲 *QR Bekleniyor*\n\n` +
           `PlayStation'ınızda:\n` +
           `*1.* Ayarlar → Kullanıcılar ve Hesaplar\n` +
           `*2.* Diğer → QR Koduyla Oturum Aç\n` +
-          `*3.* Açılan QR ekranının fotoğrafını gönderin 📸`
+          `*3.* Açılan QR ekranının fotoğrafını gönderin 📸\n\n` +
+          `Sorun yaşıyorsanız *7* yazarak yetkiliye ulaşabilirsiniz.`
         );
+        return;
       }
-      return;
+      // Menü seçimi / soru → normal akış (QR beklemesi silinmez, işletmeci #tamam ile kapatır)
     }
 
     // Kayıt akışı — musteri null olsa bile devam et
@@ -1134,14 +1438,14 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           secilenKirada = true;
           secilen = (kiradaOyunlar||[])[sayi - musaitOyunlar.length - 1];
         } else {
-          secilen = musaitOyunlar.find(o => o.ad.toLowerCase().includes(metin));
+          secilen = metin.length >= 2 ? musaitOyunlar.find(o => sadeKomut(o.ad).includes(metin)) : null;
         }
         // Müsait değil ama kirada olanlar arasında var mı?
         if (!secilen) {
           secilenKirada = true;
-          secilen = kiradaOyunlar.find(o => o.ad.toLowerCase().includes(metin));
+          secilen = metin.length >= 2 ? kiradaOyunlar.find(o => sadeKomut(o.ad).includes(metin)) : null;
         }
-        if (!secilen) { await mesajGonder(tel, `Oyun bulunamadı. Listeden numara veya isim yazın.`); return; }
+        if (!secilen) { await gecersizCevap(tel, `Oyun bulunamadı. Listeden numara veya isim yazın.`); return; }
 
         // Kirada oyun seçildi → sıraya gir seçeneği sun
         if (secilenKirada) {
@@ -1161,8 +1465,8 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const pri = gunlukFiyat(secilen, 'primary');
         const sec = gunlukFiyat(secilen, 'secondary');
         const aktif2 = veri.kiralamalar.filter(k => k.oyunId === secilen.id && k.durum === 'aktif');
-        const priDolu = aktif2.filter(k=>k.tip==='primary').length >= (secilen.ciftPrimary?2:1);
-        const secDolu = aktif2.filter(k=>k.tip==='secondary').length >= 1;
+        const priDolu = doluMu(secilen, 'primary', veri);   // kopyalar da sayılır
+        const secDolu = doluMu(secilen, 'secondary', veri);
         let tipSecim = `Hangi tipi tercih edersiniz?\n`;
         if (!priDolu) tipSecim += `*1* - 🔵 Primary: ${fmt(pri)}/gün\n`;
         if (!secDolu) tipSecim += `*2* - 🟣 Secondary: ${fmt(sec)}/gün\n`;
@@ -1181,10 +1485,10 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         if (!isNaN(sayi) && sayi >= 1 && sayi <= cikacakOyunlar.length) {
           secilen = cikacakOyunlar[sayi - 1];
         } else {
-          secilen = cikacakOyunlar.find(o => o.ad.toLowerCase().includes(metin));
+          secilen = metin.length >= 2 ? cikacakOyunlar.find(o => sadeKomut(o.ad).includes(metin)) : null;
         }
         if (!secilen) {
-          await mesajGonder(tel, `Oyun bulunamadı. Lütfen listeden bir numara yazın.`);
+          await gecersizCevap(tel, `Oyun bulunamadı. Lütfen listeden bir numara yazın.`);
           return;
         }
         const pri = gunlukFiyat(secilen, 'primary');
@@ -1201,7 +1505,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         let kiraTip = null;
         if (metin.includes('primary') || metin === '1') kiraTip = 'primary';
         else if (metin.includes('secondary') || metin === '2') kiraTip = 'secondary';
-        if (!kiraTip) { await mesajGonder(tel, `*1* - 🔵 Primary\n*2* - 🟣 Secondary`); return; }
+        if (!kiraTip) { await gecersizCevap(tel, `*1* - 🔵 Primary\n*2* - 🟣 Secondary`); return; }
 
         const veri2 = await getVeri();
         if (!veri2.rezervasyonlar) veri2.rezervasyonlar = [];
@@ -1254,7 +1558,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         let kiraTip = null;
         if (metin.includes('primary') || metin === '1') kiraTip = 'primary';
         else if (metin.includes('secondary') || metin === '2') kiraTip = 'secondary';
-        if (!kiraTip) { await mesajGonder(tel, `*1* - 🔵 Primary\n*2* - 🟣 Secondary`); return; }
+        if (!kiraTip) { await gecersizCevap(tel, `*1* - 🔵 Primary\n*2* - 🟣 Secondary`); return; }
 
         // Firebase'e rezervasyon ekle
         const veri2 = await getVeri();
@@ -1308,7 +1612,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         let kiraTip = null;
         if (metin.includes('primary') || metin === '1') kiraTip = 'primary';
         else if (metin.includes('secondary') || metin === '2') kiraTip = 'secondary';
-        if (!kiraTip) { await mesajGonder(tel, `*1* - 🔵 Primary\n*2* - 🟣 Secondary`); return; }
+        if (!kiraTip) { await gecersizCevap(tel, `*1* - 🔵 Primary\n*2* - 🟣 Secondary`); return; }
         // Dolu mu kontrol et
         if (kiraTip === 'primary' && bekleyen.priDolu) {
           await mesajGonder(tel, `🔵 Primary dolu! Lütfen 🟣 Secondary seçin (*2*) veya sıraya girin.`); return;
@@ -1326,11 +1630,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       // Kiralama akışı — gün girişi
       if (bekleyen.tip === 'kiralama_gun_bekle') {
         const gun = parseInt(metin);
-        if (isNaN(gun) || gun < 5) { await mesajGonder(tel, `Minimum 5 gün. Kaç gün?`); return; }
+        if (isNaN(gun) || gun < 5) { await gecersizCevap(tel, `Minimum 5 gün. Kaç gün?`); return; }
         const bas = bugun();
         // Hediye gün hesapla: 10+ günde yeni çıkmış değilse +5, Platin ise yeni oyunda da +5
         const oyunHediye = veri.oyunlar.find(o => o.id === bekleyen.oyunId);
-        const yeniOyun = oyunHediye?.yeniOyun || false;
+        const yeniOyun = !eskiOyunMu(oyunHediye, veri); // eskiden olmayan bir alana bakıyordu → her oyuna hediye veriliyordu
         const tierHediye = getMusteriTierBot(musteri.id, veri);
         const platinMi = tierHediye.seviye === 'platin' || tierHediye.seviye === 'platinplus';
         const hediye = ((!yeniOyun || platinMi) && gun >= 10) ? 5 : 0;
@@ -1371,7 +1675,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       // Yeni kiralama — dekont bekleniyor
       // Bakiyeden ödeme onayı
       if (bekleyen.tip === 'bakiye_onay') {
-        if (metin === 'evet') {
+        if (EVET.includes(metin)) {
           const mBakiyeOde = veri.musteriler.find(m => m.id === bekleyen.musteriId);
           if (!mBakiyeOde) { await mesajGonder(tel, 'Bir hata oluştu, tekrar deneyin.'); return; }
           if ((mBakiyeOde.bakiye||0) < bekleyen.ucret) {
@@ -1388,11 +1692,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_bekle', odemeTip: 'bakiye' });
           await banaGonder(`💰 *Bakiyeden Ödeme*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd}\n💰 ${fmt(bekleyen.ucret)} bakiyeden düşüldü\n\n#onayla ${tel.replace(/[^0-9]/g,'').slice(-10)}`);
           await mesajGonder(tel, `✅ *Bakiyenizden ${fmt(bekleyen.ucret)} düşüldü!*\n\nKalan bakiye: *${fmt(mBakiyeOde.bakiye)}*\n\nKiralamanız işleme alındı, kısa sürede onaylanacak 🙏`);
-        } else if (metin === 'hayır' || metin === 'hayir') {
+        } else if (HAYIR.includes(metin)) {
           bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont' });
           await mesajGonder(tel, `Ödemeyi yaptıktan sonra dekontu gönderin 📸\n\n💳 IBAN: ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`);
         } else {
-          await mesajGonder(tel, `Bakiyenizden ödensin mi?\n*evet* → Bakiyeden öde\n*hayır* → Havale ile öde`);
+          await gecersizCevap(tel, `Bakiyenizden ödensin mi?\n*evet* → Bakiyeden öde\n*hayır* → Havale ile öde`);
         }
         return;
       }
@@ -1410,19 +1714,18 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             `💵 Tutar: *${fmt(bekleyen.ucret)}*\n\n` +
             `Onaylamak için:\n*#onayla ${tel.replace('@c.us','').replace('@lid','')}*`
           );
-        } else if (metin === 'iptal' || metin === '#iptal' || metin === 'vazgeç' || metin === 'vazgec') {
-          bekleyenOnaylar.delete(tel);
-          await mesajGonder(tel, `❌ Kiralama iptal edildi.`);
-        } else {
-          await mesajGonder(tel, `Lütfen ödeme dekontunu *fotoğraf veya PDF* olarak gönderin 📎\n\n❌ İptal etmek için *iptal* yazın.`);
+          return;
+        } else if (!menuSecimiMi(metin) && hatirlatmaZamaniMi(tel)) {
+          await mesajGonder(tel, `Lütfen ödeme dekontunu *fotoğraf veya PDF* olarak gönderin 📎\n\n❌ Vazgeçmek için *iptal* yazın.`);
+          return;
         }
-        return;
+        // menü seçimi / soru → normal akışa devam
       }
 
       // Uzatma — gün girişi
       if (bekleyen.tip === 'uzatma_gun_bekle') {
         const gun = parseInt(metin);
-        if (isNaN(gun) || gun < 1) { await mesajGonder(tel, `Kaç gün uzatmak istiyorsunuz? (sayı yazın)`); return; }
+        if (isNaN(gun) || gun < 1) { await gecersizCevap(tel, `Kaç gün uzatmak istiyorsunuz? (sayı yazın)`); return; }
         // Tier indirimi hesapla
         const tierUzat = getMusteriTierBot(musteri.id, veri);
         const hamUcretUzat = bekleyen.gunluk * gun;
@@ -1448,65 +1751,61 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         if (medya) {
           bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'uzatma_isletmeci_bekle' });
           await mesajGonder(tel, `✅ Dekontunuz alındı! Onaylandıktan sonra uzatma yapılacak 🙏`);
-          const oyun = veri.oyunlar.find(o => o.id === bekleyen.kiraId);
+          const uzKira = veri.kiralamalar.find(k => k.id === bekleyen.kiraId);
+          const oyun = veri.oyunlar.find(o => o.id === uzKira?.oyunId); // eskiden kira id'si ile oyun aranıyordu → yanlış oyun adı
           await banaGonder(
             `💰 *UZATMA DEKONTU!*\n\n👤 *${musteriAd}*\n🎮 ${oyun?.ad||'?'}\n📅 ${bekleyen.gun} gün\n💵 ${fmt(bekleyen.ucret)}\n\n` +
             `Onaylamak için:\n*#onayla ${tel.replace('@c.us','').replace('@lid','')}*`
           );
-        } else {
-          await mesajGonder(tel, `Lütfen dekontu *fotoğraf veya PDF* olarak gönderin 📎`);
+          return;
+        } else if (!menuSecimiMi(metin) && hatirlatmaZamaniMi(tel)) {
+          await mesajGonder(tel, `Lütfen dekontu *fotoğraf veya PDF* olarak gönderin 📎\n\n❌ Vazgeçmek için *iptal* yazın.`);
+          return;
         }
-        return;
       }
 
       // İade — onay bekleniyor
       // Tavsiye seçimi — iade sonrası
       if (bekleyen.tip === 'tavsiye_secim') {
-        const { oneriler } = bekleyen;
+        const oneriler = bekleyen.oneriler || [];
         const sayi = parseInt(metin);
-        let secilen = null;
-        if (!isNaN(sayi) && sayi >= 1 && sayi <= oneriler.length) {
-          secilen = oneriler[sayi - 1];
-        } else if (metin === 'menü' || metin === 'menu' || metin === 'iptal') {
-          bekleyenOnaylar.delete(tel);
-          await mesajGonder(tel,
-            `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle`
-          );
-          return;
-        }
+        let secilen = (!isNaN(sayi) && String(sayi) === metin && sayi >= 1 && sayi <= oneriler.length) ? oneriler[sayi - 1] : null;
         if (!secilen && metin.length > 2) {
-          // Oyun adıyla arama
-          const aramaMetin = metin.toLowerCase().replace(/[^a-z0-9ğüşıöç ]/gi, '');
-          const bulunanlar = [...musaitOyunlar, ...(kiradaOyunlar||[])].filter(o =>
-            o.ad.toLowerCase().includes(aramaMetin) ||
-            aramaMetin.split(' ').some(k => k.length > 2 && o.ad.toLowerCase().includes(k))
+          // Oyun adıyla arama (eskiden tanımsız değişkenler yüzünden burada hata oluşup bot hiç cevap vermiyordu)
+          const bulunanlar = veri.oyunlar.filter(o => !o.deaktif && (!o.cikis || o.cikis <= bugun())).filter(o =>
+            sadeKomut(o.ad).includes(metin) ||
+            metin.split(' ').some(k => k.length > 2 && sadeKomut(o.ad).includes(k))
           );
           if (bulunanlar.length === 1) {
             secilen = bulunanlar[0];
-            secilenKirada = (kiradaOyunlar||[]).some(o => o.id === secilen.id);
           } else if (bulunanlar.length > 1) {
-            const oneri = bulunanlar.slice(0,3).map((o,i)=>`*${i+1}* ${o.ad}`).join('\n');
-            await mesajGonder(tel, `🔍 Şunları mı demek istediniz?\n\n${oneri}\n\nNumarasını yazın.`);
-            bekleyenOnaylar.set(tel, { ...bekleyen, musaitOyunlar: bulunanlar.filter(o=>musaitOyunlar.includes(o)), kiradaOyunlar: bulunanlar.filter(o=>(kiradaOyunlar||[]).includes(o)) });
+            const liste5 = bulunanlar.slice(0, 5);
+            await mesajGonder(tel, `🔍 Şunları mı demek istediniz?\n\n${liste5.map((o,i)=>`*${i+1}* ${o.ad}`).join('\n')}\n\nNumarasını yazın.`);
+            bekleyenOnaylar.set(tel, { ...bekleyen, oneriler: liste5 });
             return;
           }
         }
         if (!secilen) {
-          await mesajGonder(tel, `Listeden bir numara yaz (1-${oneriler.length}), veya *menü* yaz.`);
+          // Önerilerle ilgisiz bir şey yazdı → durumu bırak, normal akış (menü/SSS) cevaplasın
+          bekleyenOnaylar.delete(tel);
+        } else {
+          const priDolu = doluMu(secilen, 'primary', veri);
+          const secDolu = doluMu(secilen, 'secondary', veri);
+          if (priDolu && secDolu) {
+            await mesajGonder(tel, `⏳ *${secilen.ad}* şu an kirada.\n\nSıraya girmek ister misiniz? Slot açılınca size haber verilir 🔔\n\n*1* - 🔵 Primary sıraya gir\n*2* - 🟣 Secondary sıraya gir\n*iptal* - Vazgeç`);
+            bekleyenOnaylar.set(tel, { tip: 'rezerv_tip_bekle', musteriId: musteri.id, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad });
+            return;
+          }
+          const pri = gunlukFiyat(secilen, 'primary');
+          const sec = gunlukFiyat(secilen, 'secondary');
+          await mesajGonder(tel,
+            `🎮 *${secilen.ad}* (${secilen.platform})\n\nHangi tip kiralamak istiyorsunuz?\n\n` +
+            (priDolu ? '' : `*1* - 🔵 Primary (${fmt(pri)}/gün)\n`) +
+            (secDolu ? '' : `*2* - 🟣 Secondary (${fmt(sec)}/gün)`)
+          );
+          bekleyenOnaylar.set(tel, { tip: 'kiralama_tip_bekle', musteriId: musteri.id, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad, priDolu, secDolu });
           return;
         }
-        // Seçilen oyunu kiralama akışına aktar
-        const priDolu = veri.kiralamalar.filter(k => k.oyunId === secilen.id && k.tip === 'primary' && k.durum === 'aktif').length >= (secilen.ciftPrimary ? 2 : 1);
-        const secDolu = veri.kiralamalar.filter(k => k.oyunId === secilen.id && k.tip === 'secondary' && k.durum === 'aktif').length >= 1;
-        const pri = gunlukFiyat(secilen, 'primary');
-        const sec = gunlukFiyat(secilen, 'secondary');
-        await mesajGonder(tel,
-          `🎮 *${secilen.ad}* (${secilen.platform})\n\nHangi tip kiralamak istiyorsunuz?\n\n` +
-          `*1* - 🔵 Primary (${fmt(pri)}/gün)${priDolu ? ' — Dolu, sıraya girebilirsin' : ''}\n` +
-          `*2* - 🟣 Secondary (${fmt(sec)}/gün)${secDolu ? ' — Dolu, sıraya girebilirsin' : ''}`
-        );
-        bekleyenOnaylar.set(tel, { tip: 'kiralama_tip_bekle', musteriId: bekleyen.musteriId, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad, priDolu, secDolu });
-        return;
       }
 
       // Oyun listesi — sıralama veya arama
@@ -1526,11 +1825,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         }
         // Oyun adıyla arama
         if (metin.length > 1) {
-          const aramaMetin = metin.toLowerCase();
+          const aramaMetin = metin;
           const tumO = veri.oyunlar.filter(o => !o.deaktif);
           const bulunanlar = tumO.filter(o =>
-            o.ad.toLowerCase().includes(aramaMetin) ||
-            aramaMetin.split(' ').some(k => k.length > 2 && o.ad.toLowerCase().includes(k))
+            sadeKomut(o.ad).includes(aramaMetin) ||
+            aramaMetin.split(' ').some(k => k.length > 2 && sadeKomut(o.ad).includes(k))
           );
           if (bulunanlar.length === 1) {
             const o = bulunanlar[0];
@@ -1565,7 +1864,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const sayi = parseInt(metin);
         const kiralar = bekleyen.kiralar || [];
         if (isNaN(sayi) || sayi < 1 || sayi > kiralar.length) {
-          await mesajGonder(tel, `Lütfen listeden bir numara yazın (1-${kiralar.length})`);
+          await gecersizCevap(tel, `Lütfen listeden bir numara yazın (1-${kiralar.length})`);
           return;
         }
         const secilenKiraId = kiralar[sayi - 1];
@@ -1582,7 +1881,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const sayi = parseInt(metin);
         const kiralar = bekleyen.kiralar || [];
         if (isNaN(sayi) || sayi < 1 || sayi > kiralar.length) {
-          await mesajGonder(tel, `Lütfen listeden bir numara yazın (1-${kiralar.length})`);
+          await gecersizCevap(tel, `Lütfen listeden bir numara yazın (1-${kiralar.length})`);
           return;
         }
         const secilenKiraId = kiralar[sayi - 1];
@@ -1597,7 +1896,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       if (bekleyen.tip === 'bildirim_secim') {
         const kiraId = bekleyen.kiraId;
         const gf = bekleyen.gunluk;
-        if (metin === '3') {
+        const bKira = veri.kiralamalar.find(k => k.id === kiraId);
+        if (!bKira || bKira.durum !== 'aktif') {
+          // Kiralama bu arada siteden iade/silindi → eski bildirim durumunu bırak, normal akış
+          bekleyenOnaylar.delete(tel);
+        } else if (metin === '3' || metin.includes('iade')) {
           // İade
           const iadeKira = veri.kiralamalar.find(k => k.id === kiraId);
           const oyunIade = iadeKira ? veri.oyunlar.find(o => o.id === iadeKira.oyunId) : null;
@@ -1608,19 +1911,26 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             `*evet* yazarak onaylayın.`
           );
           return;
-        } else if (metin === '2') {
-          // Uzatma
-          bekleyenOnaylar.set(tel, { tip: 'uzatma_gun_bekle', kiraId, gunluk: gf });
-          await mesajGonder(tel, `🔄 *Süre Uzatma*\n\nKaç gün uzatmak istiyorsunuz?`);
+        } else if (metin === '2' || metin.includes('uzat')) {
+          // Uzatma — sıra varsa 1 uzatma sınırı (ana menüdeki kuralla aynı)
+          const oB = veri.oyunlar.find(o => o.id === bKira.oyunId);
+          const siradaVarB = (veri.rezervasyonlar||[]).some(r => r.oyunId === bKira.oyunId && r.tip === bKira.tip && r.durum === 'bekliyor');
+          if (siradaVarB && (bKira.uzatmaSayisi || (bKira.uzatmalar||[]).length) >= 1) {
+            bekleyenOnaylar.delete(tel);
+            await mesajGonder(tel, `⚠️ *Uzatma Hakkınız Doldu*\n\n*${oB?.ad||'Oyun'}* için sıra mevcut olduğundan yalnızca 1 kez uzatma yapılabilir.\n\nİade için *3* yazabilirsiniz 🙏`);
+            return;
+          }
+          bekleyenOnaylar.set(tel, { tip: 'uzatma_gun_bekle', kiraId, musteriId: bKira.musteriId, gunluk: gf || gunlukFiyat(oB || {}, bKira.tip) });
+          await mesajGonder(tel, `🔄 *Süre Uzatma*\n\n🎮 *${oB?.ad||''}*\n📅 Bitiş: ${fmtTarih(bKira.bit)}\n💰 Günlük: ${fmt(gf || gunlukFiyat(oB || {}, bKira.tip))}\n\nKaç gün uzatmak istiyorsunuz?`);
           return;
         } else {
-          await mesajGonder(tel, `📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın`);
-          return;
+          // 2/3 dışında bir şey yazdı → aynı uyarıyı tekrar etmek yerine normal akışa bırak
+          bekleyenOnaylar.delete(tel);
         }
       }
 
       if (bekleyen.tip === 'iade_onay') {
-        if (metin === 'evet') {
+        if (EVET.includes(metin)) {
           // Taze veri çek — stale veri sorunu önle
           const veriIade = await getVeri();
           // musteriId bekleyen'dan veya musteri'den al
@@ -1631,7 +1941,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             : aktifKiralar[0];
           if (iadeKira) {
             iadeKira.durum = 'teslim';
-            iadeKira.teslimTarih = new Date().toISOString().split('T')[0];
+            iadeKira.teslimTarih = bugun();
             // Oyun durumunu güncelle
             const oyunIade = veriIade.oyunlar.find(o => o.id === iadeKira.oyunId);
             if (oyunIade) {
@@ -1639,7 +1949,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               if (!halaKirada) oyunIade.durum = 'mevcut';
             }
             // Erken iade ödülü kontrolü
-            const bugunIade = new Date().toISOString().split('T')[0];
+            const bugunIade = bugun();
             const bitTarih = iadeKira.bit;
             const oyunCikisIade = veriIade.oyunlar.find(o => o.id === iadeKira.oyunId)?.cikis;
             const birAyOnceIade = new Date(); birAyOnceIade.setMonth(birAyOnceIade.getMonth() - 1);
@@ -1721,7 +2031,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
               // Skor yoksa popülerliğe göre fallback
               const oneriler = musaitOneriler.length > 0 ? musaitOneriler :
-                veri.oyunlar.filter(o => !o.deaktif && (!o.cikis||o.cikis<=bugun()) && o.id !== aktifKira.oyunId && !kiraliOyunIds.has(o.id))
+                veri.oyunlar.filter(o => !o.deaktif && (!o.cikis||o.cikis<=bugun()) && o.id !== iadeKira.oyunId && !kiraliOyunIds.has(o.id))
                   .sort((a,b) => (b.kiralamaSayisi||0)-(a.kiralamaSayisi||0)).slice(0,3);
 
               if (oneriler.length > 0) {
@@ -1742,7 +2052,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               }
             } catch(e) { console.error('Tavsiye hatası:', e.message); }
           }
-        } else if (metin === 'hayır' || metin === 'hayir' || metin === 'iptal') {
+        } else if (HAYIR.includes(metin) || metin === 'iptal') {
           bekleyenOnaylar.delete(tel);
           await mesajGonder(tel,
             `İptal edildi 😊\n\n👋 *${musteriAd}*, başka bir şey yapabilir miyim?\n\n` +
@@ -1750,7 +2060,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           );
           return;
         } else {
-          await mesajGonder(tel, `İade için *evet*, iptal için *hayır* yazın.`);
+          await gecersizCevap(tel, `İade için *evet*, iptal için *hayır* yazın.`);
           return;
         }
         bekleyenOnaylar.delete(tel);
@@ -1759,7 +2069,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     }
 
     // ── ANA MENÜ ──
-    if (['merhaba','selam','menu','menü','hi','başla','baslat','başlat','hey'].includes(metin)) {
+    if (['merhaba','selam','menu','hi','basla','baslat','hey','ana menu','menuye don'].includes(metin)) {
       await mesajGonder(tel,
         `👋 Merhaba *${musteriAd}*!\n\nGameRental'a hoş geldiniz 🎮\n\n` +
         `*1* - 📋 Durum & Kurallar\n*2* - 🔄 Süre uzat\n*3* - 📦 İade\n*4* - 🎮 Oyun listesi\n*5* - 🛒 Yeni kiralama\n*6* - 🏅 Üyelik seviyem\n*7* - 👤 Yetkili ile görüş\n*8* - 🗓 Çıkacak Oyunlar / Ön Rezervasyon\n*9* - 💰 Bakiye Yükle\n\nVeya sorunuzu yazın!`
@@ -1861,7 +2171,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     }
 
     // 4 — Oyun listesi
-    if (metin === '4' || metin === 'oyunlar' || metin.includes('müsait') || metin.includes('musait') || metin.includes('liste')) {
+    if (metin === '4' || metin === 'oyunlar' || metin.includes('musait') || metin.includes('musait') || metin.includes('liste')) {
       function oyunListesiGonder(sirala) {
         const tumO = veri.oyunlar.filter(o => !o.deaktif).sort((a,b) => {
           if (sirala === 'alfa') return a.ad.localeCompare(b.ad, 'tr');
@@ -1892,7 +2202,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     }
 
     // 6 — Tier / Üyelik seviyesi
-    if (metin === '6' || metin.includes('tier') || metin.includes('seviyem') || metin.includes('üyeliğim') || metin.includes('uyelik') || metin.includes('seviye') || metin.includes('kaç puan') || metin.includes('indirimim') || metin.includes('puanım')) {
+    if (metin === '6' || metin.includes('tier') || metin.includes('seviyem') || metin.includes('uyeligim') || metin.includes('uyelik') || metin.includes('seviye') || metin.includes('kac puan') || metin.includes('indirimim') || metin.includes('puanim')) {
       if (!musteri) {
         await mesajGonder(tel, `Üyelik bilgisi için önce kayıtlı olmanız gerekiyor.\nİşletmecimize ulaşın 🎮`);
         return;
@@ -1986,7 +2296,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     }
 
     // 8 — Çıkacak Oyunlar / Ön Rezervasyon
-    if (metin === '8' || metin.includes('çıkacak') || metin.includes('ön rezerv') || metin.includes('on rezerv') || metin.includes('çıkacak oyun')) {
+    if (metin === '8' || metin.includes('cikacak') || metin.includes('on rezerv') || metin.includes('on rezerv') || metin.includes('cikacak oyun')) {
       const veriOn = await getVeri();
       const now = bugun();
       const cikacakOyunlar = veriOn.oyunlar.filter(o => !o.deaktif && o.cikis && o.cikis > now)
@@ -2026,10 +2336,10 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     }
 
     // 7 — Yetkili ile görüş
-    if (metin === '7' || metin.includes('yetkili') || metin.includes('hocam') ||
-        metin.includes('insan') || metin.includes('sizi') || metin.includes('sizinle') ||
-        metin.includes('görüşmek') || metin.includes('konuşmak') || metin.includes('aramak') ||
-        metin.includes('arayabilir') || metin.includes('yetkiliye') || metin.includes('sahibi')) {
+    // Not: "hocam", "sizi", "insan" gibi günlük kelimeler kaldırıldı — "hocam merhaba" yazan müşteri botu 8 saat susturuyordu
+    if (metin === '7' || metin.includes('yetkili') || metin.includes('insanla gorus') || metin.includes('canli destek') ||
+        metin.includes('sizinle gorus') || metin.includes('gorusmek istiyorum') || metin.includes('konusmak istiyorum') ||
+        metin.includes('beni arar') || metin.includes('arayabilir misiniz') || metin.includes('isletme sahibi')) {
       // Tatil modu kontrolü
       if (veri.tatilModu && veri.tatilModu.aktif) {
         const tMesaj = (veri.tatilModu.mesaj || '')
@@ -2070,7 +2380,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     }
 
     // #iptal — müşteri akışı iptal edebilir
-    if (metin === 'iptal' || metin === '#iptal' || metin === 'vazgeç' || metin === 'vazgec') {
+    if (metin === 'iptal' || metin === '#iptal' || metin === 'vazgec' || metin === 'vazgec') {
       bekleyenOnaylar.delete(tel);
       await mesajGonder(tel, `❌ İşlem iptal edildi.\n\nAna menü için *menü* yazabilirsiniz.`);
       return;
@@ -2092,9 +2402,21 @@ Açmak için: #ac [numara] veya #menu [numara]`);
   } catch (err) {
     console.error('Webhook genel hata:', err.message, err.stack);
   }
-});
+}
 
 // ── ZAMANLANMIŞ ──
+// Bildirim "gönderildi" kayıtları Firestore'da tutulur: eskiden hafızadaydı, Railway yeniden başlayınca
+// aynı gün ikinci kez bildirim gidebiliyor ya da (1 saatlik bekleme yüzünden) o günün bildirimi hiç gitmiyordu
+async function bildirimGittiMi(key) {
+  if (bildirimGonderildi.get(key)) return true;
+  try { const d = await db.collection('botState').doc(key).get(); if (d.exists) { bildirimGonderildi.set(key, true); return true; } } catch (e) {}
+  return false;
+}
+async function bildirimGittiIsaretle(key) {
+  bildirimGonderildi.set(key, true);
+  try { await db.collection('botState').doc(key).set({ tarih: bugun(), zaman: new Date().toISOString() }); } catch (e) {}
+}
+
 async function yarinBitenKontrol() {
   const veri = await getVeri(); if (!veri) return;
   const yarin = yarinStr();
@@ -2106,11 +2428,11 @@ async function yarinBitenKontrol() {
     if (!hedef) continue;
     const gf = gunlukFiyat(o, k.tip);
     const yarinKey = `yarin_${k.id}_${yarin}`;
-    if (bildirimGonderildi.get(yarinKey)) { console.log(`⏭ Zaten gönderildi: ${yarinKey}`); continue; }
+    if (await bildirimGittiMi(yarinKey)) continue;
     const musteriAdi = ((m.ad||'') + ' ' + (m.soyad||'')).trim() || 'Değerli Müşteri';
     await mesajGonder(hedef, `🔔 *Hatırlatıcı*\n\nMerhaba *${musteriAdi}*!\n*${o?.ad}* oyununuz *yarın* bitiyor.\n\n📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın 🎮`);
-    bildirimGonderildi.set(yarinKey, true);
-    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), gunluk: gf });
+    await bildirimGittiIsaretle(yarinKey);
+    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), musteriId: m.id, gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
 }
@@ -2126,7 +2448,7 @@ async function bugunBitenKontrol() {
     if (!hedef) continue;
     const gf = gunlukFiyat(o, k.tip);
     const bugunKey = `bugun_${k.id}_${bugunTarih}`;
-    if (bildirimGonderildi.get(bugunKey)) { console.log(`⏭ Zaten gönderildi: ${bugunKey}`); continue; }
+    if (await bildirimGittiMi(bugunKey)) continue;
     const musteriAdiBugun = ((m.ad||'') + ' ' + (m.soyad||'')).trim() || 'Değerli Müşteri';
     await mesajGonder(hedef,
       `⏰ *Süre Bugün Bitiyor!*\n\n` +
@@ -2136,8 +2458,8 @@ async function bugunBitenKontrol() {
       `🔄 *Uzatmak için* → *2* yazın\n\n` +
       `Teşekkürler! 🎮`
     );
-    bildirimGonderildi.set(bugunKey, true);
-    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), gunluk: gf });
+    await bildirimGittiIsaretle(bugunKey);
+    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), musteriId: m.id, gunluk: gf });
     await new Promise(r => setTimeout(r, 1000));
   }
 }
@@ -2162,7 +2484,7 @@ async function gecikmeKontrol() {
     await mesajGonder(hedef,
       `⚠️ *Gecikmiş İade*\n\nMerhaba *${musteriAdiG}*!\n\n*${o?.ad}* oyununuzun iade süresi *${gecGun} gün* geçti.\n💰 Gecikme ücreti: *${fmt(gf*gecGun)}*\n\n📦 İade için → *3* yazın\n🔄 Uzatmak için → *2* yazın\n\nLütfen en kısa sürede işlem yapın 🙏`
     );
-    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), gunluk: gf });
+    bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), musteriId: m.id, gunluk: gf });
     gecikmeOzet.push(`• ${musteriAdiG} — ${o?.ad} (${gecGun}g, +${fmt(gf*gecGun)})`);
     try { await db.collection('botState').doc(`uyari_${k.id}`).set({ tarih: now }); } catch(e) {}
     await new Promise(r => setTimeout(r, 1000));
@@ -2198,7 +2520,7 @@ async function rezervSiraKontrol() {
 
     // Slot müsait mi?
     const aktifSayisi = veri.kiralamalar.filter(k => k.oyunId === oyunId && k.tip === tip && k.durum === 'aktif').length;
-    const maxSlot = tip === 'primary' ? (o.ciftPrimary ? 2 : 1) : 1;
+    const maxSlot = slotKapasite(o, tip); // kopyalar da dahil (eskiden sadece ana hesap sayılıyordu)
     if (aktifSayisi >= maxSlot) continue; // slot dolu, geç
 
     // Slot müsait — sıradaki ilk kişiyi bul
@@ -2248,28 +2570,55 @@ async function rezervSiraKontrol() {
 }
 
 
-// Restart sonrası hemen çalışmasın — ilk kontrol 1 saat sonra
-// Gecikme kontrolü: Firebase'e tarih yazar, aynı gün tekrar atmaz
-let _ilkBaslangic = Date.now();
-setInterval(async () => {
-  if (Date.now() - _ilkBaslangic < 60 * 60 * 1000) {
-    console.log('⏳ Zamanlayıcı bekleme modunda (restart sonrası)');
-    return;
+// ── ZAMANLAYICI (İstanbul saati) ──
+// Eskiden sunucu saati (UTC) kullanılıyordu: "15" aslında İstanbul'da 18:00'di, gecikme uyarıları gece 03:00'te
+// gidebiliyordu. Restart sonrası 1 saat bekleme yüzünden o günün bildirimleri bazen hiç gitmiyordu.
+// Artık her 15 dakikada kontrol edilir; "gönderildi" bilgisi Firestore'da tutulduğu için tekrar gitmez.
+const SAAT = {
+  bitisBildirimi: 18,       // bugün/yarın biten hatırlatmaları (eski davranışla aynı: 18:00)
+  gecikmeBaslangic: 11,     // gecikme uyarıları 11:00'den sonra, günde 1 kez
+  rezervBaslangic: 9, rezervBitis: 21,
+};
+let _zamanlayiciCalisiyor = false;
+async function zamanlayici() {
+  if (_zamanlayiciCalisiyor) return;
+  _zamanlayiciCalisiyor = true;
+  try {
+    const saat = trSaat();
+    if (saat >= SAAT.bitisBildirimi && saat < 22) {
+      await yarinBitenKontrol();
+      await bugunBitenKontrol();
+    }
+    if (saat >= SAAT.gecikmeBaslangic && saat < 22) await gecikmeKontrol();
+    if (saat >= SAAT.rezervBaslangic && saat < SAAT.rezervBitis) await rezervSiraKontrol();
+  } catch (e) {
+    console.error('Zamanlayıcı hatası:', e.message);
   }
-  const saat = new Date().getHours();
-  if (saat === 15) await yarinBitenKontrol();
-  if (saat === 15) await bugunBitenKontrol();
-  await gecikmeKontrol();
-  // Rezerv bildirimi sadece 09:00-21:00 arası çalışsın
-  if (saat >= 9 && saat < 21) await rezervSiraKontrol();
-  else console.log(`🌙 Rezerv kontrol atlandı (saat ${saat}:xx)`);
-}, 60 * 60 * 1000);
+  _zamanlayiciCalisiyor = false;
+}
+setInterval(zamanlayici, 15 * 60 * 1000);
+setTimeout(zamanlayici, 2 * 60 * 1000); // açılıştan 2 dk sonra ilk kontrol
+
+// ── API YETKİLENDİRME ──
+// Site artık Firebase giriş token'ını (idToken) da gönderiyor: token doğrulanırsa ve senin hesabınsa geçer.
+// Ya da Railway'de BOT_API_KEY tanımlarsan o anahtar geçerli olur. Eskiden 'admin' anahtarı herkese açıktı.
+async function apiYetkiliMi(body) {
+  const { apiKey, idToken } = body || {};
+  if (idToken) {
+    try {
+      const t = await admin.auth().verifyIdToken(idToken);
+      if (t.uid === CONFIG.USER_UID) return true;
+    } catch (e) { console.warn('idToken doğrulanamadı:', e.message); }
+  }
+  const gecerli = process.env.BOT_API_KEY || CONFIG.WAHA_API_KEY;
+  return !!(gecerli && apiKey && apiKey === gecerli);
+}
 
 // ── TOPLU DUYURU API ──
 // Site buraya POST atar: { mesaj, alicilar: [{tel, ad}], apiKey }
 app.post('/api/duyuru-onay', async (req, res) => {
-  const { tel, ad, apiKey } = req.body || {};
-  if (apiKey !== (CONFIG.WAHA_API_KEY || 'admin')) return res.status(401).json({ hata: 'Yetkisiz' });
+  const { tel, ad } = req.body || {};
+  if (!(await apiYetkiliMi(req.body))) return res.status(401).json({ hata: 'Yetkisiz' });
   if (!tel) return res.status(400).json({ hata: 'tel gerekli' });
   try {
     const adTemiz = (ad||'Müşterimiz').trim();
@@ -2297,10 +2646,8 @@ app.post('/api/duyuru-onay', async (req, res) => {
 });
 
 app.post('/api/duyuru', async (req, res) => {
-  const { mesaj, alicilar, apiKey } = req.body || {};
-
-  // Basit güvenlik: aynı WAHA api key ile doğrula
-  if (apiKey !== (CONFIG.WAHA_API_KEY || 'admin')) {
+  const { mesaj, alicilar } = req.body || {};
+  if (!(await apiYetkiliMi(req.body))) {
     return res.status(401).json({ hata: 'Yetkisiz' });
   }
   if (!mesaj || !Array.isArray(alicilar) || alicilar.length === 0) {
@@ -2314,7 +2661,7 @@ app.post('/api/duyuru', async (req, res) => {
   for (const kisi of alicilar) {
     const tel = temizTel(String(kisi.tel || ''));
     if (tel.length < 10) { basarisiz++; continue; }
-    const kisiMesaj = mesaj.replace('{isim}', kisi.ad || 'Değerli Müşterimiz');
+    const kisiMesaj = mesaj.replace(/\{isim\}/g, kisi.ad || 'Değerli Müşterimiz');
     await mesajGonder(tel, kisiMesaj);
     basarili++;
     await new Promise(r => setTimeout(r, 2000)); // 2sn ara
