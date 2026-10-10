@@ -203,6 +203,13 @@ function doluMu(oyun, tip, veri) {
   const aktif = veri.kiralamalar.filter(k => k.oyunId === oyun.id && k.durum === 'aktif' && k.tip === tip).length;
   return aktif >= slotKapasite(oyun, tip);
 }
+// Geri kazanım kampanyasıyla tanımlanan, süresi dolmamış ve kullanılmamış kişiye özel indirim
+function aktifOzelIndirim(m) {
+  const oz = m && m.ozelIndirim;
+  if (!oz || oz.kullanildi || !(oz.oran > 0)) return null;
+  if (oz.bitis && oz.bitis < bugun()) return null;
+  return oz;
+}
 // Müşterinin bu oyun için bekleme listesindeki (onaylanmış) ön ödemesi
 function bekleyenOnOdemeBul(veri, musteriId, oyunId, tip, rezervId) {
   const r = (veri.rezervasyonlar || []).filter(x => x.durum === 'bekliyor' && x.musteriId === musteriId && x.oyunId === oyunId);
@@ -1107,6 +1114,13 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             kopyaIdx, odemeTip: hedefBekleyen.odemeTip || 'havale', // bakiye ile ödenenler tier'da çift sayılmasın
             ...(hedefBekleyen.onOdeme > 0 ? { rezervOnOdeme: hedefBekleyen.onOdeme, rezervId: hedefBekleyen.rezervId } : {}),
           });
+          // Özel indirim kullanıldıysa işaretle (kampanya sonucunda "geri döndü" olarak sayılır)
+          if (hedefBekleyen.ozelIndirimKullan) {
+            const mOz = veri2.musteriler.find(m => m.id === hedefBekleyen.musteriId);
+            if (mOz && mOz.ozelIndirim) { mOz.ozelIndirim.kullanildi = true; mOz.ozelIndirim.kiraId = yeniId; }
+            const yk = veri2.kiralamalar.find(k => k.id === yeniId);
+            if (yk && mOz?.ozelIndirim?.kampanyaId) yk.kampanyaId = mOz.ozelIndirim.kampanyaId;
+          }
           // Bekleme listesi kaydını "kiralandı" yap (eskiden bot ile kiralayanlar listede "bekliyor" olarak kalıyordu)
           let fazlaOnOdeme = 0;
           (veri2.rezervasyonlar || []).forEach(r => {
@@ -1671,7 +1685,10 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         // Tier indirimini hesapla
         const tierMusteri = getMusteriTierBot(musteri.id, veri);
         const hamUcret = bekleyen.gunluk * gun;
-        const indirimOrani = tierMusteri.indirim || 0;
+        // Kişiye özel (geri kazanım) indirimi varsa ve üyelik indiriminden yüksekse o uygulanır
+        const ozel = aktifOzelIndirim(veri.musteriler.find(m => m.id === musteri.id));
+        const ozelKullan = !!ozel && ozel.oran > (tierMusteri.indirim || 0);
+        const indirimOrani = ozelKullan ? ozel.oran : (tierMusteri.indirim || 0);
         const indirimTL = Math.round(hamUcret * indirimOrani / 100);
         const ucret = hamUcret - indirimTL;
         // Bekleme listesinde ön ödeme yaptıysa kiralama tutarından düşülür
@@ -1685,12 +1702,12 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         ozet += ` (${bas} → ${bit})\n`;
         if (indirimOrani > 0) {
           ozet += `💰 Normal fiyat: ${fmt(hamUcret)}\n`;
-          ozet += `${tierMusteri.emoji} *${tierMusteri.label} indirimi %${indirimOrani}: -${fmt(indirimTL)}*\n`;
+          ozet += ozelKullan ? `🎁 *Size özel indirim %${indirimOrani}: -${fmt(indirimTL)}*\n` : `${tierMusteri.emoji} *${tierMusteri.label} indirimi %${indirimOrani}: -${fmt(indirimTL)}*\n`;
           ozet += `✅ Ödenecek tutar: *${fmt(ucret)}*\n\n`;
         } else {
           ozet += `💰 Toplam: *${fmt(ucret)}*\n\n`;
         }
-        const durumOrtak = { gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit, kalan, onOdeme, rezervId: rezervKayit?.id || null };
+        const durumOrtak = { gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit, kalan, onOdeme, rezervId: rezervKayit?.id || null, ozelIndirimKullan: ozelKullan };
         if (onOdeme > 0) {
           ozet += `💳 Bekleme listesi ön ödemeniz: *-${fmt(onOdeme)}*\n`;
           ozet += kalan > 0 ? `➡️ Kalan ödenecek: *${fmt(kalan)}*\n\n` : `✅ Ön ödemeniz tutarı karşılıyor${fazla > 0 ? ` (fazla *${fmt(fazla)}* bakiyenize aktarılacak)` : ''}\n\n`;
@@ -2593,7 +2610,10 @@ async function rezervSiraKontrol() {
       });
 
     if (!siralar.length) continue;
-    const ilk = siralar[0];
+    // Kaç slot boşsa sıradaki o kadar kişiye haber ver (eskiden sadece ilk kişiye gidiyordu —
+    // ör. çıkış günü 3 slot boşken günde 1 kişi bilgilendiriliyordu)
+    const bosSlotSayisi = maxSlot - aktifSayisi;
+    for (const ilk of siralar.slice(0, bosSlotSayisi)) {
     const ilkTier = getMusteriTierBot(ilk.musteriId, veri);
     const oncelikli = ilkTier.seviye === 'platinplus';
 
@@ -2629,6 +2649,7 @@ async function rezervSiraKontrol() {
     ilk.sonBildirimTarih = now;
     await setVeri(veri);
     await new Promise(r => setTimeout(r, 1000));
+    }
   }
 }
 
@@ -2805,7 +2826,8 @@ app.get('/d/:token', async (req, res) => {
       <div class="satir-alt">Son 3 ay harcama: <b>${fmt(tier.toplam)}</b></div>
       <div class="bar"><div style="width:${Math.max(3, ilerleme)}%;background:#8b5cf6"></div></div>
       <div class="satir-alt">${sonraki ? `<b>${sonraki.ad}</b> seviyesine <b>${fmt(sonraki.t - tier.toplam)}</b> kaldı` : 'En üst seviyedesiniz 🏆'}</div>
-      ${(m.bakiye || 0) > 0 ? `<div class="satir-alt" style="margin-top:8px">💰 Bakiyeniz: <b>${fmt(m.bakiye)}</b></div>` : ''}</div>`;
+      ${(m.bakiye || 0) > 0 ? `<div class="satir-alt" style="margin-top:8px">💰 Bakiyeniz: <b>${fmt(m.bakiye)}</b></div>` : ''}
+      ${aktifOzelIndirim(m) ? `<div class="satir-alt" style="margin-top:8px;color:#fbbf24">🎁 Size özel <b>%${m.ozelIndirim.oran} indirim</b>${m.ozelIndirim.bitis ? ` — ${fmtTarih(m.ozelIndirim.bitis)} tarihine kadar` : ''}</div>` : ''}</div>`;
     // Geçmiş
     if (gecmis.length) {
       h += `<div class="kart"><h2>📜 Son Kiralamalar</h2>`;
@@ -2889,24 +2911,28 @@ app.post('/api/duyuru', async (req, res) => {
   if (!(await apiYetkiliMi(req.body))) {
     return res.status(401).json({ hata: 'Yetkisiz' });
   }
-  if (!mesaj || !Array.isArray(alicilar) || alicilar.length === 0) {
+  // Her alıcıya ayrı metin gönderilebilir (kisi.metin) — lansman / geri kazanım mesajları kişiye özel
+  if ((!mesaj && !(alicilar || []).some(k => k.metin)) || !Array.isArray(alicilar) || alicilar.length === 0) {
     return res.status(400).json({ hata: 'mesaj ve alicilar zorunlu' });
   }
+  if (alicilar.length > 100) return res.status(400).json({ hata: 'Tek seferde en fazla 100 kişi' });
+  const aralik = Math.min(10000, Math.max(2000, parseInt(req.body.aralikMs) || 2000));
+  const baslik = String(req.body.baslik || 'Toplu duyuru').slice(0, 60);
 
   res.json({ durum: 'basliyor', toplam: alicilar.length });
 
-  // Arka planda gönder — her mesaj arasında 2sn bekle (spam koruması)
+  // Arka planda gönder — mesajlar arasında bekleme (WhatsApp spam koruması)
   let basarili = 0, basarisiz = 0;
   for (const kisi of alicilar) {
-    const tel = temizTel(String(kisi.tel || ''));
-    if (tel.length < 10) { basarisiz++; continue; }
-    const kisiMesaj = mesaj.replace(/\{isim\}/g, kisi.ad || 'Değerli Müşterimiz');
-    await mesajGonder(tel, kisiMesaj);
+    const hedef = kisi.chatId && String(kisi.chatId).includes('@') ? String(kisi.chatId) : temizTel(String(kisi.tel || ''));
+    if (!hedef.includes('@') && hedef.length < 10) { basarisiz++; continue; }
+    const kisiMesaj = String(kisi.metin || mesaj).replace(/\{isim\}/g, kisi.ad || 'Değerli Müşterimiz');
+    await mesajGonder(hedef, kisiMesaj);
     basarili++;
-    await new Promise(r => setTimeout(r, 2000)); // 2sn ara
+    await new Promise(r => setTimeout(r, aralik));
   }
 
-  const ozet = `📣 Toplu duyuru tamamlandı\n✅ ${basarili} başarılı\n❌ ${basarisiz} başarısız`;
+  const ozet = `📣 ${baslik} tamamlandı\n✅ ${basarili} başarılı\n❌ ${basarisiz} başarısız`;
   console.log(ozet);
   await banaGonder(ozet);
 });
