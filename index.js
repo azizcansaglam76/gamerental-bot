@@ -2148,6 +2148,8 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         txt += `• 🔵 Primary bitince: önce ana hesabı devre dışı bırakın, sonra silin\n`;
         txt += `• 🟣 Secondary bitince: hesabı direkt silebilirsiniz\n`;
         txt += `• Sıra olan oyunlarda uzatma *1 kez* ile sınırlıdır`;
+        const link = await durumLinki(musteri);
+        if (link) txt += `\n\n🔗 *Tüm detaylar (kalan süre, sıra, üyelik):*\n${link}`;
         await mesajGonder(tel, txt);
       } else {
         // Aktif kiralama yoksa süreç + kuralları anlat
@@ -2164,7 +2166,8 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           `⏰ *Süre:*\nKiraladığınız gün kadar hesaba erişebilirsiniz. Süre dolduktan sonra hesaba erişmeye devam etmek güven ihlali sayılır.\n\n` +
           `🔄 *Uzatma:*\nSırası olan oyunlarda uzatma hakkı yalnızca *1 kez* kullanılabilir.\n\n` +
           `🎁 *Hediye Gün:*\nYeni çıkmış oyunlar hariç tüm oyunlarda 10 gün kiralamada *+5 gün hediye* otomatik eklenir.\n\n` +
-          `Yeni kiralama için *5* yazın 🎮`
+          `Yeni kiralama için *5* yazın 🎮` +
+          await (async () => { const l = musteri ? await durumLinki(musteri) : null; return l ? `\n\n🔗 Sıra ve üyelik durumunuz: ${l}` : ''; })()
         );
       }
       return;
@@ -2658,6 +2661,182 @@ async function zamanlayici() {
 }
 setInterval(zamanlayici, 15 * 60 * 1000);
 setTimeout(zamanlayici, 2 * 60 * 1000); // açılıştan 2 dk sonra ilk kontrol
+
+// ══════════════════════════════════════════
+// 🤖 SİTEDEN "BOT HATIRLATSIN" — tek veya toplu
+// ══════════════════════════════════════════
+function hatirlatmaMesaji(k, m, o) {
+  const ad = ((m.ad || '') + ' ' + (m.soyad || '')).trim() || 'Değerli Müşterimiz';
+  const now = bugun();
+  const gf = gunlukFiyat(o || {}, k.tip);
+  const secenek = `📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın`;
+  if (k.bit < now) {
+    const gec = gunFarki(k.bit, now);
+    return { tur: 'gecikme', metin: `⚠️ *Gecikmiş İade*\n\nMerhaba *${ad}*!\n\n*${o?.ad || 'Oyun'}* oyununuzun iade süresi *${gec} gün* geçti.\n💰 Gecikme ücreti: *${fmt(gf * gec)}*\n\n${secenek}\n\nLütfen en kısa sürede işlem yapın 🙏` };
+  }
+  if (k.bit === now) return { tur: 'bugun', metin: `⏰ *Süre Bugün Bitiyor!*\n\nMerhaba *${ad}*! *${o?.ad || 'Oyun'}* oyununuzun kiralama süresi *bugün* sona eriyor.\n\n${secenek}\n\nTeşekkürler! 🎮` };
+  if (k.bit === yarinStr()) return { tur: 'yarin', metin: `🔔 *Hatırlatıcı*\n\nMerhaba *${ad}*!\n*${o?.ad || 'Oyun'}* oyununuz *yarın* bitiyor.\n\n${secenek} 🎮` };
+  const kalan = gunFarki(now, k.bit);
+  return { tur: 'genel', metin: `🔔 *Hatırlatıcı*\n\nMerhaba *${ad}*!\n*${o?.ad || 'Oyun'}* kiralamanızın bitmesine *${kalan} gün* kaldı (${fmtTarih(k.bit)}).\n\n${secenek} 🎮` };
+}
+
+app.post('/api/hatirlat', async (req, res) => {
+  if (!(await apiYetkiliMi(req.body))) return res.status(401).json({ hata: 'Yetkisiz' });
+  const ids = Array.isArray(req.body.kiraIds) ? req.body.kiraIds.map(Number).filter(Boolean) : [];
+  if (!ids.length) return res.status(400).json({ hata: 'kiraIds gerekli' });
+  let veri;
+  try { veri = await getVeri(); } catch (e) { return res.status(500).json({ hata: e.message }); }
+  const sonuc = [];
+  for (const id of ids) {
+    const k = veri.kiralamalar.find(x => x.id === id);
+    const m = k && veri.musteriler.find(x => x.id === k.musteriId);
+    const hedef = m && (m.whatsappLid || (m.tel ? temizTel(m.tel) + '@c.us' : null));
+    if (!k || k.durum !== 'aktif') sonuc.push({ id, ok: false, hata: 'Aktif kiralama değil' });
+    else if (!hedef) sonuc.push({ id, ok: false, hata: 'Telefon yok' });
+    else sonuc.push({ id, ok: true, k, m, hedef });
+  }
+  const gonderilecek = sonuc.filter(x => x.ok);
+  res.json({ ok: true, toplam: gonderilecek.length, atlanan: sonuc.filter(x => !x.ok).map(x => ({ id: x.id, hata: x.hata })) });
+  // Arka planda, mesajlar arası 1.5 sn (WhatsApp spam koruması)
+  for (const x of gonderilecek) {
+    try {
+      const o = veri.oyunlar.find(y => y.id === x.k.oyunId);
+      const { tur, metin } = hatirlatmaMesaji(x.k, x.m, o);
+      await mesajGonder(x.hedef, metin);
+      bekleyenSet(x.m, { tip: 'bildirim_secim', kiraId: x.k.id, musteriId: x.m.id, gunluk: gunlukFiyat(o || {}, x.k.tip) });
+      // Aynı gün zamanlayıcı tekrar göndermesin
+      if (tur === 'bugun') await bildirimGittiIsaretle(`bugun_${x.k.id}_${bugun()}`);
+      if (tur === 'yarin') await bildirimGittiIsaretle(`yarin_${x.k.id}_${yarinStr()}`);
+      if (tur === 'gecikme') { try { await db.collection('botState').doc(`uyari_${x.k.id}`).set({ tarih: bugun() }); } catch (e) {} }
+    } catch (e) { console.error('Hatırlatma hatası:', e.message); }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  if (gonderilecek.length > 1) await banaGonder(`🤖 Siteden toplu hatırlatma gönderildi: ${gonderilecek.length} müşteri`);
+});
+
+// ══════════════════════════════════════════
+// 🔗 MÜŞTERİ DURUM SAYFASI — /d/<token>
+// Müşteriye özel, tahmin edilemeyen link. Sadece o müşterinin kendi bilgileri görünür.
+// ══════════════════════════════════════════
+const PUBLIC_URL = (process.env.PUBLIC_URL || 'https://gamerental-bot-production.up.railway.app').replace(/\/+$/, '');
+function yeniToken() { return require('crypto').randomBytes(12).toString('base64url'); }
+async function durumLinki(musteri) {
+  try {
+    if (!musteri) return null;
+    if (!musteri.durumToken) {
+      const veri = await getVeri();
+      const m = veri.musteriler.find(x => x.id === musteri.id);
+      if (!m) return null;
+      if (!m.durumToken) { m.durumToken = yeniToken(); await setVeri(veri); }
+      musteri.durumToken = m.durumToken;
+    }
+    return `${PUBLIC_URL}/d/${musteri.durumToken}`;
+  } catch (e) { console.error('durumLinki hatası:', e.message); return null; }
+}
+function htmlEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function siraNumarasi(veri, r) {
+  const liste = (veri.rezervasyonlar || []).filter(x => x.oyunId === r.oyunId && x.tip === r.tip && x.durum === 'bekliyor')
+    .sort((a, b) => {
+      const pa = getMusteriTierBot(a.musteriId, veri).seviye === 'platinplus' ? 0 : 1;
+      const pb = getMusteriTierBot(b.musteriId, veri).seviye === 'platinplus' ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      if (!!a.atla !== !!b.atla) return a.atla ? 1 : -1;
+      return (a.sira || a.id) - (b.sira || b.id);
+    });
+  return { no: liste.findIndex(x => x.id === r.id) + 1, toplam: liste.length };
+}
+
+const durumIstekleri = new Map(); // basit hız sınırı: IP başına dakikada 30 istek
+app.get('/d/:token', async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.ip || '';
+  const simdi = Date.now();
+  const kayit = (durumIstekleri.get(ip) || []).filter(t => simdi - t < 60000);
+  kayit.push(simdi); durumIstekleri.set(ip, kayit);
+  if (kayit.length > 30) return res.status(429).send('Çok fazla istek, biraz sonra tekrar deneyin.');
+  res.set('X-Robots-Tag', 'noindex, nofollow');
+  res.set('Cache-Control', 'no-store');
+  try {
+    const token = String(req.params.token || '');
+    const veri = token.length >= 12 ? await getVeri() : null;
+    const m = veri && veri.musteriler.find(x => x.durumToken && x.durumToken === token);
+    if (!m) return res.status(404).send(durumSayfasi('Bulunamadı', `<div class="kart"><p>Bu bağlantı geçersiz veya yenilenmiş. Güncel bağlantı için WhatsApp'tan <b>1</b> yazabilirsiniz.</p></div>`));
+    const now = bugun();
+    const ad = ((m.ad || '') + ' ' + (m.soyad || '')).trim() || 'Müşterimiz';
+    const aktif = veri.kiralamalar.filter(k => k.musteriId === m.id && k.durum === 'aktif').sort((a, b) => a.bit.localeCompare(b.bit));
+    const gecmis = veri.kiralamalar.filter(k => k.musteriId === m.id && k.durum !== 'aktif').sort((a, b) => (b.bas || '').localeCompare(a.bas || '')).slice(0, 5);
+    const bekleme = (veri.rezervasyonlar || []).filter(r => r.musteriId === m.id && r.durum === 'bekliyor');
+    const tier = getMusteriTierBot(m.id, veri);
+    const oyunAd = id => htmlEsc(veri.oyunlar.find(o => o.id === id)?.ad || 'Oyun');
+    let h = `<div class="ust"><div class="selam">Merhaba ${htmlEsc(ad)} 👋</div><div class="tarih">${fmtTarih(now)} itibarıyla</div></div>`;
+    // Aktif kiralamalar
+    h += `<div class="kart"><h2>🎮 Aktif Kiralamalar</h2>`;
+    if (!aktif.length) h += `<p class="soluk">Şu an aktif kiralamanız yok. Yeni kiralama için WhatsApp'tan <b>5</b> yazabilirsiniz.</p>`;
+    aktif.forEach(k => {
+      const kalan = gunFarki(now, k.bit);
+      const toplam = Math.max(1, gunFarki(k.bas, k.bit) + 1);
+      const gecen = Math.min(toplam, Math.max(0, gunFarki(k.bas, now) + 1));
+      const yuzde = Math.round(gecen / toplam * 100);
+      const durum = kalan < 0 ? `<span class="rozet kirmizi">${-kalan} gün gecikti</span>` : kalan === 0 ? `<span class="rozet turuncu">Bugün bitiyor</span>` : kalan === 1 ? `<span class="rozet turuncu">Yarın bitiyor</span>` : `<span class="rozet yesil">${kalan} gün kaldı</span>`;
+      h += `<div class="satir"><div class="satir-ust"><b>${oyunAd(k.oyunId)}</b> <span class="tip">${k.tip === 'primary' ? 'Primary' : 'Secondary'}</span></div>
+        <div class="satir-alt">${fmtTarih(k.bas)} → <b>${fmtTarih(k.bit)}</b> ${durum}</div>
+        <div class="bar"><div style="width:${yuzde}%;background:${kalan < 0 ? '#ef4444' : kalan <= 1 ? '#f59e0b' : '#10b981'}"></div></div></div>`;
+    });
+    if (aktif.length) h += `<p class="ipucu">Uzatmak için WhatsApp'tan <b>2</b>, iade için <b>3</b> yazın.</p>`;
+    h += `</div>`;
+    // Bekleme listesi
+    if (bekleme.length) {
+      h += `<div class="kart"><h2>⏳ Bekleme Listesi</h2>`;
+      bekleme.forEach(r => {
+        const s = siraNumarasi(veri, r);
+        const o = veri.oyunlar.find(x => x.id === r.oyunId);
+        const cikmadi = o?.cikis && o.cikis > now;
+        h += `<div class="satir"><div class="satir-ust"><b>${oyunAd(r.oyunId)}</b> <span class="tip">${r.tip === 'primary' ? 'Primary' : 'Secondary'}</span></div>
+          <div class="satir-alt">${cikmadi ? `Çıkış: ${fmtTarih(o.cikis)} · ` : ''}Sıranız: <b>${s.no}</b> / ${s.toplam}${r.onOdeme > 0 ? ` · Ön ödeme: ${fmt(r.onOdeme)}${r.onOdemeOnaylandi ? ' ✓' : ' (onay bekliyor)'}` : ''}</div></div>`;
+      });
+      h += `<p class="ipucu">Sıranız geldiğinde WhatsApp'tan otomatik bildirim alırsınız.</p></div>`;
+    }
+    // Üyelik
+    const ta = veri.tierAyarlar || {};
+    const esikler = [{ ad: 'Gümüş', t: ta.gumus ?? 750 }, { ad: 'Altın', t: ta.altin ?? 1500 }, { ad: 'Platin', t: ta.platin ?? 3000 }, { ad: 'Platin+', t: ta.platinplus ?? 5000 }];
+    const sonraki = esikler.find(e => tier.toplam < e.t);
+    const onceki = [...esikler].reverse().find(e => tier.toplam >= e.t);
+    const ilerleme = sonraki ? Math.round((tier.toplam - (onceki ? onceki.t : 0)) / (sonraki.t - (onceki ? onceki.t : 0)) * 100) : 100;
+    h += `<div class="kart"><h2>🏅 Üyelik</h2><div class="tier">${tier.emoji} <b>${htmlEsc(tier.label)}</b>${tier.indirim ? ` · <span class="yesil-y">%${tier.indirim} indirim</span>` : ''}</div>
+      <div class="satir-alt">Son 3 ay harcama: <b>${fmt(tier.toplam)}</b></div>
+      <div class="bar"><div style="width:${Math.max(3, ilerleme)}%;background:#8b5cf6"></div></div>
+      <div class="satir-alt">${sonraki ? `<b>${sonraki.ad}</b> seviyesine <b>${fmt(sonraki.t - tier.toplam)}</b> kaldı` : 'En üst seviyedesiniz 🏆'}</div>
+      ${(m.bakiye || 0) > 0 ? `<div class="satir-alt" style="margin-top:8px">💰 Bakiyeniz: <b>${fmt(m.bakiye)}</b></div>` : ''}</div>`;
+    // Geçmiş
+    if (gecmis.length) {
+      h += `<div class="kart"><h2>📜 Son Kiralamalar</h2>`;
+      gecmis.forEach(k => { h += `<div class="gecmis"><span>${oyunAd(k.oyunId)}</span><span class="soluk">${fmtTarih(k.bas)} → ${fmtTarih(k.teslimTarih || k.bit)}</span></div>`; });
+      h += `</div>`;
+    }
+    res.send(durumSayfasi('Kiralama Durumum', h));
+  } catch (e) {
+    console.error('Durum sayfası hatası:', e.message);
+    res.status(500).send(durumSayfasi('Hata', `<div class="kart"><p>Şu an bilgiler yüklenemedi, lütfen biraz sonra tekrar deneyin.</p></div>`));
+  }
+});
+function durumSayfasi(baslik, govde) {
+  return `<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>${htmlEsc(baslik)} · GameRental</title>
+<style>
+:root{--bg:#0b0b12;--kart:#161622;--kenar:#262636;--yazi:#f1f1f6;--soluk:#9a9ab0}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--yazi);font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;line-height:1.45}
+.kap{max-width:520px;margin:0 auto;padding:18px 16px 40px}.logo{font-weight:800;font-size:18px;margin-bottom:14px}.logo span{color:#00c6ff}
+.ust{margin-bottom:14px}.selam{font-size:20px;font-weight:700}.tarih{color:var(--soluk);font-size:13px}
+.kart{background:var(--kart);border:1px solid var(--kenar);border-radius:14px;padding:14px 16px;margin-bottom:12px}
+h2{font-size:15px;margin:0 0 10px}.satir{padding:10px 0;border-top:1px solid var(--kenar)}.satir:first-of-type{border-top:none;padding-top:0}
+.satir-ust{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.satir-alt{color:var(--soluk);font-size:13px;margin-top:4px}
+.tip{font-size:11px;padding:2px 8px;border-radius:99px;background:#1f2a44;color:#7cc4ff}
+.rozet{font-size:12px;padding:2px 8px;border-radius:99px;margin-left:4px;font-weight:600}.yesil{background:#0f3d2e;color:#34d399}.turuncu{background:#422c0b;color:#fbbf24}.kirmizi{background:#45151a;color:#f87171}
+.bar{height:6px;background:#262636;border-radius:99px;overflow:hidden;margin-top:8px}.bar div{height:100%;border-radius:99px}
+.ipucu{font-size:13px;color:var(--soluk);margin:10px 0 0}.soluk{color:var(--soluk)}.tier{font-size:17px;margin-bottom:4px}.yesil-y{color:#34d399}
+.gecmis{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--kenar);font-size:14px}.gecmis:first-of-type{border-top:none}
+.alt{color:var(--soluk);font-size:12px;text-align:center;margin-top:18px}
+</style></head><body><div class="kap"><div class="logo">🎮 Game<span>Rental</span></div>${govde}<div class="alt">Bu sayfa size özeldir, başkalarıyla paylaşmayın.</div></div></body></html>`;
+}
 
 // ── API YETKİLENDİRME ──
 // Site artık Firebase giriş token'ını (idToken) da gönderiyor: token doğrulanırsa ve senin hesabınsa geçer.
