@@ -47,13 +47,14 @@ const db = admin.firestore();
 // sadece botun DEĞİŞTİRDİĞİ kayıtları (id bazında) birleştirerek yazar. Site de aynı yöntemi kullanıyor.
 const veriRef = () => db.collection('users').doc(CONFIG.USER_UID).collection('data').doc('psrental');
 const okunanHal = new WeakMap(); // veri objesi → okunduğu andaki JSON
-const DIZI_ALANLAR = { oyunlar: 'o', musteriler: 'm', kiralamalar: 'k', rezervasyonlar: 'r', ekMaliyetler: 'mal', karaListe: 'kl', ekGelirler: 'eg' };
+const DIZI_ALANLAR = { oyunlar: 'o', musteriler: 'm', kiralamalar: 'k', rezervasyonlar: 'r', ekMaliyetler: 'mal', karaListe: 'kl', ekGelirler: 'eg', kampanyalar: 'kmp' };
 
 async function getVeri() {
   const doc = await veriRef().get();
   if (!doc.exists) return null;
   const data = doc.data();
   okunanHal.set(data, JSON.stringify(data));
+  kampanyaOnbellek = Array.isArray(data.kampanyalar) ? data.kampanyalar : [];
   return data;
 }
 
@@ -221,10 +222,61 @@ function slotKapasite(oyun, tip) {
     ? (oyun?.ciftPrimary ? 2 : 1) + kopyalar.reduce((t, k) => t + (k.ciftPrimary ? 2 : 1), 0)
     : 1 + kopyalar.length;
 }
-function gunlukFiyat(oyun, tip) {
+// Liste fiyatı (kampanyasız) — gecikme ücreti bununla hesaplanır
+function listeFiyat(oyun, tip) {
+  oyun = oyun || {};
   return tip === 'primary'
     ? (oyun.gunlukPri || oyun.gunluk || 0)
     : (oyun.gunlukSec || Math.round((oyun.gunlukPri || oyun.gunluk || 0) * 0.7)); // site ile aynı: secondary fiyatı yoksa %70
+}
+// ── PLANLI KAMPANYALAR (sitede Büyüme → Kampanyalar) ──
+// Son okunan verideki kampanyalar; getVeri() her çağrıldığında güncellenir
+let kampanyaOnbellek = [];
+function kampanyaAktifMi(k, tarih) { tarih = tarih || bugun(); return !k.iptal && k.baslangic <= tarih && tarih <= k.bitis; }
+function kampanyaKapsar(k, o, tarih) {
+  if (!o) return false;
+  const kp = k.kapsam || { tip: 'hepsi' };
+  if (kp.tip === 'secili') return (kp.oyunIds || []).includes(o.id);
+  if (kp.tip === 'eski') return !!o.cikis && gunFarki(o.cikis, tarih || bugun()) >= (kp.gun || 120);
+  if (kp.tip === 'platform') return (o.platform || '').includes(kp.platform || '');
+  return true;
+}
+function oyunKampanyasi(o, tarih) {
+  tarih = tarih || bugun();
+  return kampanyaOnbellek.filter(k => k.tur === 'indirim' && kampanyaAktifMi(k, tarih) && kampanyaKapsar(k, o, tarih)).sort((a, b) => b.oran - a.oran)[0] || null;
+}
+function aktifPaketKampanyasi(tarih) {
+  return kampanyaOnbellek.filter(k => k.tur === 'paket' && kampanyaAktifMi(k, tarih)).sort((a, b) => b.oran - a.oran)[0] || null;
+}
+// Müşterinin son 2 gün içinde başlamış başka aktif kiralaması varsa paket indirimi geçerli
+function paketUygunMu(veri, musteriId, bas) {
+  const p = aktifPaketKampanyasi(bas); if (!p || !musteriId) return null;
+  const sinir = tarihEkle(bas || bugun(), -2);
+  const diger = (veri.kiralamalar || []).filter(k => k.musteriId === musteriId && k.durum === 'aktif' && k.bas >= sinir);
+  return diger.length >= (p.minOyun || 2) - 1 ? p : null;
+}
+// Müşteriye gösterilen günlük fiyat — aktif fiyat kampanyası varsa indirimli
+function gunlukFiyat(oyun, tip) {
+  const taban = listeFiyat(oyun, tip);
+  const k = oyunKampanyasi(oyun);
+  return k ? Math.max(1, Math.round(taban * (1 - k.oran / 100))) : taban;
+}
+// Listelerde oyun adının yanına kampanya etiketi
+function kampEtiket(o) { const k = oyunKampanyasi(o); return k ? ` 🏷️%${k.oran}` : ''; }
+// Oyun listelerinin başına aktif kampanya duyurusu
+function kampanyaBaslik() {
+  const now = bugun();
+  const aktif = kampanyaOnbellek.filter(k => kampanyaAktifMi(k, now));
+  if (!aktif.length) return '';
+  return aktif.map(k => k.tur === 'paket'
+    ? `📦 *${k.ad}:* ${k.minOyun || 2} oyunu birlikte kiralayana ikinci oyunda *%${k.oran} indirim* (${fmtTarih(k.bitis)}'e kadar)`
+    : `🏷️ *${k.ad}:* işaretli oyunlarda *%${k.oran} indirim* (${fmtTarih(k.bitis)}'e kadar)`).join('\n') + '\n\n';
+}
+// Kiralamanın verildiği PSN hesabının adı (şifre tutulmaz)
+function kiraHesabi(k, veri) {
+  const o = (veri.oyunlar || []).find(x => x.id === k.oyunId); if (!o) return '';
+  if (k.kopyaIdx > 0) { const kp = (o.kopyalar || [])[k.kopyaIdx - 1]; return (kp && (kp.hesap || kp.not)) || ('Kopya ' + (k.kopyaIdx + 1)); }
+  return o.hesap || 'Ana hesap';
 }
 
 // ── BEKLEYENLERİ ÇİFT KAYDET (hem lid hem tel) ──
@@ -267,11 +319,42 @@ function getMusteriTierBot(musteriId, veri) {
     altin:      ta.altin      ?? 1500,
     gumus:      ta.gumus      ?? 750,
   };
-  if (toplam >= T.platinplus) return { seviye: 'platinplus', emoji: '👑', label: 'Platin+', indirim: ta.platinplusIndirim??20, toplam, sonraki: null, kalanTL: 0, oncelikliRezervHakki: true };
-  if (toplam >= T.platin)     return { seviye: 'platin', emoji: '💎', label: 'Platin', indirim: ta.platinIndirim??15, toplam, sonraki: 'Platin+ 👑', kalanTL: T.platinplus - toplam };
-  if (toplam >= T.altin)      return { seviye: 'altin',  emoji: '🥇', label: 'Altın',  indirim: ta.altinIndirim??10,  toplam, sonraki: 'Platin 💎',  kalanTL: T.platin - toplam };
+  // 'platinplus' iç anahtar olarak kalır (kayıtlı ayarlar bozulmasın), müşteriye "Elmas" olarak görünür
+  if (toplam >= T.platinplus) return { seviye: 'platinplus', emoji: '💎', label: 'Elmas', indirim: ta.platinplusIndirim??20, toplam, sonraki: null, kalanTL: 0, oncelikliRezervHakki: true };
+  if (toplam >= T.platin)     return { seviye: 'platin', emoji: '🏆', label: 'Platin', indirim: ta.platinIndirim??15, toplam, sonraki: 'Elmas 💎', kalanTL: T.platinplus - toplam };
+  if (toplam >= T.altin)      return { seviye: 'altin',  emoji: '🥇', label: 'Altın',  indirim: ta.altinIndirim??10,  toplam, sonraki: 'Platin 🏆',  kalanTL: T.platin - toplam };
   if (toplam >= T.gumus)      return { seviye: 'gumus',  emoji: '🥈', label: 'Gümüş',  indirim: ta.gumusIndirim??5,   toplam, sonraki: 'Altın 🥇',   kalanTL: T.altin - toplam };
   return                             { seviye: 'bronz',  emoji: '🥉', label: 'Bronz',  indirim: 0, toplam, sonraki: 'Gümüş 🥈', kalanTL: T.gumus - toplam };
+}
+
+// ── 💎 ELMAS ÜYELİK TEKLİFİ ──
+// Sırada beklemek istemeyen müşteriye: bakiye yükleyerek Elmas ol → bekleme listesinde en başa geç
+function elmasEsik(veri) { const ta = (veri && veri.tierAyarlar) || {}; return { esik: ta.platinplus ?? 5000, indirim: ta.platinplusIndirim ?? 20 }; }
+function elmasMi(musteriId, veri) { return !!musteriId && getMusteriTierBot(musteriId, veri).seviye === 'platinplus'; }
+function elmasGereken(musteriId, veri) { return Math.max(0, Math.ceil(elmasEsik(veri).esik - (getMusteriTierBot(musteriId, veri).toplam || 0))); }
+function elmasSecenek(musteriId, veri) { return musteriId && !elmasMi(musteriId, veri) ? `\n*3* - 💎 Beklemek istemiyorum, öne geçmek istiyorum` : ''; }
+function elmasTanitim(musteriId, veri, oyunAd) {
+  const { esik, indirim } = elmasEsik(veri);
+  const gereken = elmasGereken(musteriId, veri);
+  return `💎 *Elmas Üyelik*\n\n` +
+    (oyunAd ? `*${oyunAd}* için sırada beklemek istemiyorsan Elmas ol:\n` : '') +
+    `Elmas üyeler bekleme listelerinde *sıranın en başına geçer* — slot boşalınca ilk haber onlara gider.\n\n` +
+    `*Avantajlar:*\n` +
+    `• ⏫ Tüm bekleme listelerinde *öncelik*\n` +
+    `• 🏷️ Tüm kiralamalarda *%${indirim} indirim*\n` +
+    `• 🎁 10+ günlük kiralamalarda *5 gün hediye* (yeni çıkan oyunlarda bile)\n\n` +
+    `*Nasıl Elmas olunur?*\n` +
+    `Son 3 aydaki harcaman + yüklediğin bakiye *${fmt(esik)}* olunca otomatik Elmas olursun.\n` +
+    `👉 Senin için gereken: *${fmt(gereken)}* bakiye\n\n` +
+    `Yüklediğin bakiye kaybolmaz, kiralamalarında indirimli fiyattan kullanırsın. ` +
+    `Yüklenen tutar *3 ay* boyunca üyeliğine sayılır.`;
+}
+function elmasOdemeBilgisi(gereken) {
+  return `💳 *Ödeme Bilgileri*\n` +
+    `Tutar: *${fmt(gereken)}* (veya daha fazlası)\n` +
+    `IBAN: \`${CONFIG.IBAN}\`\n` +
+    `Hesap Sahibi: ${CONFIG.HESAP_ISIM}\n\n` +
+    `Açıklamaya *adınızı ve soyadınızı* yazın, dekontu buraya gönderin. Bakiyen yüklenince Elmas olursun ve sıradaysan otomatik olarak en başa geçersin 💎`;
 }
 
 function tierMesajiOlustur(tier, musteriAd, veri) {
@@ -315,7 +398,7 @@ function tierMesajiOlustur(tier, musteriAd, veri) {
   } else if (tier.seviye === 'platinplus') {
     mesaj += `• 🏷️ *%${I.platinplus} indirim* tüm kiralamalarda\n`;
     mesaj += `• 🎁 *10+ günlük kiralamalarda 5 gün hediye*\n`;
-    mesaj += `• 👑 *Öncelikli rezerv hakkı* — sıra beklemeden 24 saat öncelik\n`;
+    mesaj += `• ⏫ *Bekleme listelerinde öncelik* — sıranın en başına geçersin\n`;
     mesaj += `• ⚡ Öncelikli VIP destek\n`;
     mesaj += `• Tüm oyunlara erişim\n`;
   }
@@ -325,11 +408,12 @@ function tierMesajiOlustur(tier, musteriAd, veri) {
   mesaj += `🥉 *Bronz* — ₺0+\n`;
   mesaj += `🥈 *Gümüş* — ₺${T.gumus.toLocaleString('tr-TR')}+ → %${I.gumus} indirim\n`;
   mesaj += `🥇 *Altın* — ₺${T.altin.toLocaleString('tr-TR')}+ → %${I.altin} indirim\n`;
-  mesaj += `💎 *Platin* — ₺${T.platin.toLocaleString('tr-TR')}+ → %${I.platin} indirim + hediye gün\n`;
-  mesaj += `👑 *Platin+* — ₺${T.platinplus.toLocaleString('tr-TR')}+ → %${I.platinplus} indirim + öncelikli rezerv\n\n`;
+  mesaj += `🏆 *Platin* — ₺${T.platin.toLocaleString('tr-TR')}+ → %${I.platin} indirim + hediye gün\n`;
+  mesaj += `💎 *Elmas* — ₺${T.platinplus.toLocaleString('tr-TR')}+ → %${I.platinplus} indirim + bekleme listesinde öncelik\n\n`;
 
   if (tier.sonraki) {
     mesaj += `📈 *${tier.sonraki}* için *${fmt(tier.kalanTL)}* daha harca!\n`;
+    mesaj += `💎 Bakiye yükleyerek hemen *Elmas* olabilirsin — bilgi için *elmas* yaz\n`;
   } else {
     mesaj += `🏆 En üst seviyedesin, tebrikler!\n`;
   }
@@ -441,6 +525,7 @@ const STATE_SURESI = {
   qr_bekle: 2 * 24 * 60 * 60 * 1000,
   qr_onay_bekle: 2 * 24 * 60 * 60 * 1000,
   bildirim_secim: 2 * 24 * 60 * 60 * 1000,
+  iade_cevrimdisi_bekle: 2 * 24 * 60 * 60 * 1000, // primary iade: "çevrimdışı oynamayı kapattınız mı?"
 };
 // İşletmeci onayı bekleyen işlemler (ödeme yapılmış). Müşteri bu arada başka bir menüye geçerse
 // bu kayıt kaybolmasın diye ayrı tutulur — #onayla her iki yerde de arar.
@@ -493,8 +578,8 @@ PlayStation 4 ve PlayStation 5 oyunlarını günlük kiralama sistemiyle uygun f
 
 Piyasaya çıkalı 1 ayı dolan oyunlarda *10 gün ve üzeri* kiralamalarda *5 gün hediye* eklenir!
 
-💎 *Platin üyeler* bu avantajı *yeni çıkan oyunlarda bile* kullanabilir
-👑 *Platin+ üyeler* de aynı şekilde tüm oyunlarda hediye günden yararlanır
+🏆 *Platin üyeler* bu avantajı *yeni çıkan oyunlarda bile* kullanabilir
+💎 *Elmas üyeler* de aynı şekilde tüm oyunlarda hediye günden yararlanır
 
 ━━━━━━━━━━━━━━━━━━━━━
 🏅 *Üyelik Avantajları*
@@ -504,8 +589,8 @@ Ne kadar çok kiralama yaparsanız o kadar çok kazanırsınız!
 🥉 Bronz → Standart fiyat
 🥈 Gümüş (₺750+) → %5 indirim
 🥇 Altın (₺1.500+) → %10 indirim
-💎 Platin (₺3.000+) → %15 indirim + yeni oyunlarda da hediye gün
-👑 Platin+ → %20 indirim + öncelikli rezerv + tüm oyunlarda hediye gün
+🏆 Platin (₺3.000+) → %15 indirim + yeni oyunlarda da hediye gün
+💎 Elmas (₺5.000+) → %20 indirim + bekleme listesinde öncelik + tüm oyunlarda hediye gün
 
 ━━━━━━━━━━━━━━━━━━━━━
 Şimdi kaydınızı oluşturalım 😊
@@ -896,6 +981,13 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         return;
       }
 
+      // #ozet — sabah özetini şimdi gönder
+      if (metin === '#ozet' || metin === '#özet') {
+        try { await banaGonder(sabahOzetiMetni(await getVeri())); }
+        catch (e) { await banaGonder('❌ Özet hazırlanamadı: ' + e.message); }
+        return;
+      }
+
       // #durum — bot durumu ozeti
       if (metin === '#durum') {
         try {
@@ -951,6 +1043,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           const veriBakiye = await getVeri();
           const mBakiye = veriBakiye.musteriler.find(m => (m.tel||'').replace(/[^0-9]/g,'').endsWith(hedefNumara.slice(-10)));
           if (!mBakiye) { await banaGonder(`❌ Müşteri bulunamadı: ${hedefNumara}`); return; }
+          const elmasOnce = elmasMi(mBakiye.id, veriBakiye);
           mBakiye.bakiye = (mBakiye.bakiye || 0) + tutar;
           if (!mBakiye.bakiyeGecmis) mBakiye.bakiyeGecmis = [];
           mBakiye.bakiyeGecmis.push({ tarih: bugun(), tutar, aciklama });
@@ -965,6 +1058,15 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               `Kiralamalarınızda bakiyenizi kullanabilirsiniz 🎮\n\n` +
               `${BAKIYE_BILGI}`
             );
+          }
+          if (!elmasOnce && elmasMi(mBakiye.id, veriBakiye)) {
+            const siralar = (veriBakiye.rezervasyonlar || []).filter(r => r.musteriId === mBakiye.id && r.durum === 'bekliyor');
+            const oyunlar = siralar.map(r => (veriBakiye.oyunlar.find(o => o.id === r.oyunId) || {}).ad).filter(Boolean);
+            if (hedefBakiye) await mesajGonder(hedefBakiye,
+              `💎 *Tebrikler, artık Elmas üyesin!*\n\n` +
+              `• ⏫ Bekleme listelerinde önceliklisin\n• 🏷️ Kiralamalarda *%${elmasEsik(veriBakiye).indirim} indirim*\n• 🎁 10+ günde 5 gün hediye\n` +
+              (oyunlar.length ? `\n✅ Şu sıralarda en başa geçtin: *${[...new Set(oyunlar)].join(', ')}*\nSlot boşalınca ilk haber sana gelecek 🔔` : ''));
+            await banaGonder(`💎 ${mBakiye.ad || ''} ${mBakiye.soyad || ''} artık *Elmas* üye${oyunlar.length ? ` — sıralarda en başa geçti (${[...new Set(oyunlar)].join(', ')})` : ''}`);
           }
           await banaGonder(`✅ Bakiye yüklendi:\n👤 ${mBakiye.ad} ${mBakiye.soyad}\n💰 +${fmt(tutar)} → Toplam: ${fmt(mBakiye.bakiye)}`);
         } else {
@@ -1113,6 +1215,8 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             onOdeme: hedefBekleyen.ucret, hediyeGun, notlar: 'Bot ile eklendi', durum: 'aktif',
             kopyaIdx, odemeTip: hedefBekleyen.odemeTip || 'havale', // bakiye ile ödenenler tier'da çift sayılmasın
             ...(hedefBekleyen.onOdeme > 0 ? { rezervOnOdeme: hedefBekleyen.onOdeme, rezervId: hedefBekleyen.rezervId } : {}),
+            ...(hedefBekleyen.fiyatKampanyaId ? { fiyatKampanyaId: hedefBekleyen.fiyatKampanyaId } : {}),
+            ...(hedefBekleyen.paketKampanyaId ? { paketKampanyaId: hedefBekleyen.paketKampanyaId } : {}),
           });
           // Özel indirim kullanıldıysa işaretle (kampanya sonucunda "geri döndü" olarak sayılır)
           if (hedefBekleyen.ozelIndirimKullan) {
@@ -1186,7 +1290,8 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           if (tierAtladi) {
             await banaGonder(`🏅 *Tier Değişimi*\n👤 ${hedefBekleyen.musteriAd}\n${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} ${tierSonrasi.label}`);
           }
-          await banaGonder(`✅ Kiralama eklendi!\n🎮 ${hedefBekleyen.oyunAd}\n👤 ${hedefBekleyen.musteriAd}\n📅 ${bas} → ${bit}${hediyeGun > 0 ? ` (+${hediyeGun} gün hediye)` : ''}\n\n📲 QR bekleniyor — müşteri gönderince sana iletilecek.\nGiriş sonrası: *#tamam ${hedefKey.replace('@c.us','').replace('@lid','')}*`);
+          const yeniKiraHesap = kiraHesabi(veri2.kiralamalar.find(k => k.id === yeniId) || {}, veri2);
+          await banaGonder(`✅ Kiralama eklendi!\n🎮 ${hedefBekleyen.oyunAd}\n👤 ${hedefBekleyen.musteriAd}\n📅 ${bas} → ${bit}${hediyeGun > 0 ? ` (+${hediyeGun} gün hediye)` : ''}${yeniKiraHesap ? `\n🔑 Hesap: *${yeniKiraHesap}*` : ''}\n\n📲 QR bekleniyor — müşteri gönderince sana iletilecek.\nGiriş sonrası: *#tamam ${hedefKey.replace('@c.us','').replace('@lid','')}*`);
           return;
         }
 
@@ -1347,11 +1452,14 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       if (medya) {
         // Dekont geldi — sana ilet
         const sBakiye = bekleyen.musteriAd || 'Müşteri';
+        // LID ile yazan müşteride sohbet numarası telefon değildir — #bakiye için kayıtlı telefonu kullan
+        const bTel = telSon10((veri.musteriler || []).find(m => m.id === bekleyen.musteriId)?.tel) || tel.replace(/[^0-9]/g,'').slice(-10);
         await banaGonder(
           `💰 *Bakiye Yükleme Talebi*\n\n` +
           `👤 ${sBakiye}\n` +
-          `📱 ${tel.replace(/[^0-9]/g,'').slice(-10)}\n\n` +
-          `Yüklemek için: *#bakiye ${tel.replace(/[^0-9]/g,'').slice(-10)} [tutar]*`
+          `📱 ${bTel}\n` +
+          (bekleyen.elmas ? `💎 *Elmas olmak için* (gereken: ${fmt(bekleyen.gereken)}${bekleyen.oyunAd ? ` · sırada: ${bekleyen.oyunAd}` : ''})\n` : '') +
+          `\nYüklemek için: *#bakiye ${bTel} [tutar]*`
         );
         await mesajGonder(tel,
           `✅ Dekontunuz alındı! Kısa sürede bakiyenize yüklenecektir 🙏\n\n` +
@@ -1470,15 +1578,19 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
       // Kiralama akışı — oyun seçimi
       if (bekleyen.tip === 'kiralama_oyun_bekle') {
-        const { musaitOyunlar, kiradaOyunlar = [] } = bekleyen;
+        const { musaitOyunlar, kiradaOyunlar = [], cikacakOyunlar = [] } = bekleyen;
         let secilen = null;
         let secilenKirada = false;
+        let secilenCikacak = false;
         const sayi = parseInt(metin);
         if (!isNaN(sayi) && sayi >= 1 && sayi <= musaitOyunlar.length) {
           secilen = musaitOyunlar[sayi - 1];
         } else if (!isNaN(sayi) && sayi >= 1 && sayi <= (musaitOyunlar.length + (kiradaOyunlar||[]).length)) {
           secilenKirada = true;
           secilen = (kiradaOyunlar||[])[sayi - musaitOyunlar.length - 1];
+        } else if (!isNaN(sayi) && sayi >= 1 && sayi <= (musaitOyunlar.length + kiradaOyunlar.length + cikacakOyunlar.length)) {
+          secilenCikacak = true;
+          secilen = cikacakOyunlar[sayi - musaitOyunlar.length - kiradaOyunlar.length - 1];
         } else {
           secilen = metin.length >= 2 ? musaitOyunlar.find(o => sadeKomut(o.ad).includes(metin)) : null;
         }
@@ -1487,7 +1599,27 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           secilenKirada = true;
           secilen = metin.length >= 2 ? kiradaOyunlar.find(o => sadeKomut(o.ad).includes(metin)) : null;
         }
+        // Yakında çıkacaklar arasında var mı?
+        if (!secilen) {
+          secilenKirada = false; secilenCikacak = true;
+          secilen = metin.length >= 2 ? cikacakOyunlar.find(o => sadeKomut(o.ad).includes(metin)) : null;
+        }
         if (!secilen) { await gecersizCevap(tel, `Oyun bulunamadı. Listeden numara veya isim yazın.`); return; }
+
+        // Henüz çıkmamış oyun seçildi → ön rezervasyon (8 menüsüyle aynı akış)
+        if (secilenCikacak) {
+          const siradaki = (veri.rezervasyonlar||[]).filter(r => r.oyunId === secilen.id && r.durum === 'bekliyor').length;
+          const pri = gunlukFiyat(secilen, 'primary');
+          const sec = gunlukFiyat(secilen, 'secondary');
+          await mesajGonder(tel,
+            `🗓 *${secilen.ad}*\n📅 Çıkış tarihi: *${fmtTarih(secilen.cikis)}*\n` +
+            `${siradaki > 0 ? `👥 Şu an ${siradaki} kişi sırada\n` : '🥇 Henüz sırada kimse yok — ilk sen ol!\n'}\n` +
+            `Oyun çıkınca sıra sana geldiğinde haber veririz 🔔\nHangi slot için yer ayırtmak istersin?\n\n` +
+            `*1* - 🔵 Primary (${fmt(pri)}/gün)\n*2* - 🟣 Secondary (${fmt(sec)}/gün)${siradaki > 0 ? elmasSecenek(musteri.id, veri) : ''}\n*iptal* - Vazgeç`
+          );
+          bekleyenOnaylar.set(tel, { tip: 'on_rezerv_tip_bekle', musteriId: musteri.id, oyunId: secilen.id, oyunAd: secilen.ad, musteriAd });
+          return;
+        }
 
         // Kirada oyun seçildi → sıraya gir seçeneği sun
         if (secilenKirada) {
@@ -1498,7 +1630,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             `⏳ *${secilen.ad}* şu an kirada.\n\n` +
             `${siradaki > 0 ? `👥 Sırada ${siradaki} kişi var.\n\n` : ''}` +
             `🔵 Primary: ${fmt(pri)}/gün\n🟣 Secondary: ${fmt(sec)}/gün\n\n` +
-            `Sıraya girmek ister misiniz? Slot açılınca size haber verilir 🔔\n\n*1* - 🔵 Primary sıraya gir\n*2* - 🟣 Secondary sıraya gir\n*iptal* - Vazgeç`
+            `Sıraya girmek ister misiniz? Slot açılınca size haber verilir 🔔\n\n*1* - 🔵 Primary sıraya gir\n*2* - 🟣 Secondary sıraya gir${elmasSecenek(musteri.id, veri)}\n*iptal* - Vazgeç`
           );
           bekleyenOnaylar.set(tel, { tip: 'rezerv_tip_bekle', musteriId: musteri.id, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad });
           return;
@@ -1535,8 +1667,9 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         }
         const pri = gunlukFiyat(secilen, 'primary');
         const sec = gunlukFiyat(secilen, 'secondary');
+        const siradaki8 = (veri.rezervasyonlar||[]).filter(r => r.oyunId === secilen.id && r.durum === 'bekliyor').length;
         await mesajGonder(tel,
-          `🎮 *${secilen.ad}*\n📅 Çıkış tarihi: ${fmtTarih(secilen.cikis)}\n\nHangi slot için yer ayırtmak istiyorsunuz?\n\n*1* - 🔵 Primary (${fmt(pri)}/gün)\n*2* - 🟣 Secondary (${fmt(sec)}/gün)`
+          `🎮 *${secilen.ad}*\n📅 Çıkış tarihi: ${fmtTarih(secilen.cikis)}${siradaki8 > 0 ? `\n👥 Şu an ${siradaki8} kişi sırada` : ''}\n\nHangi slot için yer ayırtmak istiyorsunuz?\n\n*1* - 🔵 Primary (${fmt(pri)}/gün)\n*2* - 🟣 Secondary (${fmt(sec)}/gün)${siradaki8 > 0 ? elmasSecenek(bekleyen.musteriId, veri) : ''}`
         );
         bekleyenOnaylar.set(tel, { tip: 'on_rezerv_tip_bekle', musteriId: bekleyen.musteriId, oyunId: secilen.id, oyunAd: secilen.ad, musteriAd });
         return;
@@ -1544,6 +1677,12 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
       // Ön rezervasyon — tip seçimi
       if (bekleyen.tip === 'on_rezerv_tip_bekle') {
+        if ((metin === '3' || metin.includes('elmas')) && !elmasMi(bekleyen.musteriId, veri)) {
+          bekleyenOnaylar.set(tel, { ...bekleyen, elmasIstiyor: true });
+          await mesajGonder(tel, elmasTanitim(bekleyen.musteriId, veri, bekleyen.oyunAd) +
+            `\n\n━━━━━━━━━━━━━━━\nÖnce seni sıraya ekleyelim — Elmas olunca otomatik olarak en başa geçersin.\nHangi slot?\n\n*1* - 🔵 Primary\n*2* - 🟣 Secondary\n*iptal* - Vazgeç`);
+          return;
+        }
         let kiraTip = null;
         if (metin.includes('primary') || metin === '1') kiraTip = 'primary';
         else if (metin.includes('secondary') || metin === '2') kiraTip = 'secondary';
@@ -1567,6 +1706,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             `*${bekleyen.oyunAd}* için ${noOn}. sıradasınız.\n\n` +
             `Oyun çıkınca otomatik bildirim alacaksınız 🔔`
           );
+          if (bekleyen.elmasIstiyor) {
+            const gerekenE = elmasGereken(bekleyen.musteriId, veri2);
+            await mesajGonder(tel, elmasOdemeBilgisi(gerekenE));
+            bekleyenOnaylar.set(tel, { tip: 'bakiye_yukle_dekont', musteriId: bekleyen.musteriId, musteriAd: bekleyen.musteriAd, elmas: true, gereken: gerekenE, oyunAd: bekleyen.oyunAd });
+          }
           return;
         }
 
@@ -1592,11 +1736,25 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         await mesajGonder(tel,
           `✅ *${bekleyen.oyunAd}* için ön rezervasyonunuz alındı!\n\n${tipLabel}\n📅 Oyun çıkış tarihi: ${fmtTarih(o?.cikis||'')}\n\nOyun çıktığında sıranız gelince otomatik bildirim gönderilir 🔔`
         );
-        await banaGonder(`🗓 *Ön Rezervasyon (Bot)*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd} (${tipLabel})\n📅 Çıkış: ${o?.cikis||'?'}\n📍 Sıra: ${siradakiSayi + 1}`);
+        await banaGonder(`🗓 *Ön Rezervasyon (Bot)*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd} (${tipLabel})\n📅 Çıkış: ${o?.cikis||'?'}\n📍 Sıra: ${siradakiSayi + 1}${bekleyen.elmasIstiyor ? '\n💎 Elmas olmak istiyor — ödeme bilgisi gönderildi' : ''}`);
+
+        if (bekleyen.elmasIstiyor) {
+          const gerekenE = elmasGereken(bekleyen.musteriId, veri2);
+          await mesajGonder(tel, elmasOdemeBilgisi(gerekenE));
+          bekleyenOnaylar.set(tel, { tip: 'bakiye_yukle_dekont', musteriId: bekleyen.musteriId, musteriAd: bekleyen.musteriAd, elmas: true, gereken: gerekenE, oyunAd: bekleyen.oyunAd });
+        } else if (siradakiSayi > 0 && !elmasMi(bekleyen.musteriId, veri2)) {
+          await mesajGonder(tel, `💎 Önünde ${siradakiSayi} kişi var. Beklemeden öne geçmek istersen *elmas* yaz.`);
+        }
         return;
       }
 
       if (bekleyen.tip === 'rezerv_tip_bekle') {
+        if ((metin === '3' || metin.includes('elmas')) && !elmasMi(bekleyen.musteriId, veri)) {
+          bekleyenOnaylar.set(tel, { ...bekleyen, elmasIstiyor: true });
+          await mesajGonder(tel, elmasTanitim(bekleyen.musteriId, veri, bekleyen.oyunAd) +
+            `\n\n━━━━━━━━━━━━━━━\nÖnce seni sıraya ekleyelim — Elmas olunca otomatik olarak en başa geçersin.\nHangi slot?\n\n*1* - 🔵 Primary\n*2* - 🟣 Secondary\n*iptal* - Vazgeç`);
+          return;
+        }
         let kiraTip = null;
         if (metin.includes('primary') || metin === '1') kiraTip = 'primary';
         else if (metin.includes('secondary') || metin === '2') kiraTip = 'secondary';
@@ -1622,6 +1780,11 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             `*${bekleyen.oyunAd}* için ${tipLabel2} sırasında ${siradakiNo}. sıradasınız.\n\n` +
             `Slot açılınca otomatik bildirim alacaksınız 🔔`
           );
+          if (bekleyen.elmasIstiyor) {
+            const gerekenE = elmasGereken(bekleyen.musteriId, veri2);
+            await mesajGonder(tel, elmasOdemeBilgisi(gerekenE));
+            bekleyenOnaylar.set(tel, { tip: 'bakiye_yukle_dekont', musteriId: bekleyen.musteriId, musteriAd: bekleyen.musteriAd, elmas: true, gereken: gerekenE, oyunAd: bekleyen.oyunAd });
+          }
           return;
         }
 
@@ -1646,7 +1809,15 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         await mesajGonder(tel,
           `✅ *${bekleyen.oyunAd}* için sıraya girdiniz!\n\n${tipLabel}\n\nSlot açılınca size otomatik bildirim gönderilir 🔔`
         );
-        await banaGonder(`🔔 *Yeni Rezervasyon (Bot)*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd} (${tipLabel})\n📍 Sıra: ${siradakiSayi + 1}`);
+        await banaGonder(`🔔 *Yeni Rezervasyon (Bot)*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd} (${tipLabel})\n📍 Sıra: ${siradakiSayi + 1}${bekleyen.elmasIstiyor ? '\n💎 Elmas olmak istiyor — ödeme bilgisi gönderildi' : ''}`);
+
+        if (bekleyen.elmasIstiyor) {
+          const gerekenE = elmasGereken(bekleyen.musteriId, veri2);
+          await mesajGonder(tel, elmasOdemeBilgisi(gerekenE));
+          bekleyenOnaylar.set(tel, { tip: 'bakiye_yukle_dekont', musteriId: bekleyen.musteriId, musteriAd: bekleyen.musteriAd, elmas: true, gereken: gerekenE, oyunAd: bekleyen.oyunAd });
+        } else if (siradakiSayi > 0 && !elmasMi(bekleyen.musteriId, veri2)) {
+          await mesajGonder(tel, `💎 Önünde ${siradakiSayi} kişi var. Beklemeden öne geçmek istersen *elmas* yaz.`);
+        }
         return;
       }
 
@@ -1687,8 +1858,12 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const hamUcret = bekleyen.gunluk * gun;
         // Kişiye özel (geri kazanım) indirimi varsa ve üyelik indiriminden yüksekse o uygulanır
         const ozel = aktifOzelIndirim(veri.musteriler.find(m => m.id === musteri.id));
-        const ozelKullan = !!ozel && ozel.oran > (tierMusteri.indirim || 0);
-        const indirimOrani = ozelKullan ? ozel.oran : (tierMusteri.indirim || 0);
+        // Paket kampanyası: 2 gün içinde başlamış başka aktif kiralaması varsa
+        const paket = paketUygunMu(veri, musteri.id, bas);
+        const ozelKullan = !!ozel && ozel.oran > (tierMusteri.indirim || 0) && !(paket && paket.oran >= ozel.oran);
+        const paketKullan = !!paket && paket.oran > (tierMusteri.indirim || 0) && !ozelKullan;
+        const indirimOrani = ozelKullan ? ozel.oran : paketKullan ? paket.oran : (tierMusteri.indirim || 0);
+        const fiyatKampanya = oyunKampanyasi(oyunHediye, bas);
         const indirimTL = Math.round(hamUcret * indirimOrani / 100);
         const ucret = hamUcret - indirimTL;
         // Bekleme listesinde ön ödeme yaptıysa kiralama tutarından düşülür
@@ -1698,16 +1873,20 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const kalan = Math.max(0, ucret - onOdeme);
         const fazla = Math.max(0, onOdeme - ucret);
         let ozet = `📋 *Kiralama Özeti*\n\n🎮 *${bekleyen.oyunAd}*\n🎯 ${bekleyen.kiraTip}\n📅 ${gun} gün`;
-        if (hediye > 0) ozet += platinMi && yeniOyun ? ` *+${hediye} gün hediye 🎁 (💎 Platin ayrıcalığı)*` : ` *+${hediye} gün hediye 🎁*`;
+        if (hediye > 0) ozet += platinMi && yeniOyun ? ` *+${hediye} gün hediye 🎁 (${tierHediye.seviye === 'platinplus' ? '💎 Elmas' : '🏆 Platin'} ayrıcalığı)*` : ` *+${hediye} gün hediye 🎁*`;
         ozet += ` (${bas} → ${bit})\n`;
+        if (fiyatKampanya) ozet += `🏷️ *${fiyatKampanya.ad}* — günlük fiyata %${fiyatKampanya.oran} kampanya indirimi uygulandı\n`;
         if (indirimOrani > 0) {
           ozet += `💰 Normal fiyat: ${fmt(hamUcret)}\n`;
-          ozet += ozelKullan ? `🎁 *Size özel indirim %${indirimOrani}: -${fmt(indirimTL)}*\n` : `${tierMusteri.emoji} *${tierMusteri.label} indirimi %${indirimOrani}: -${fmt(indirimTL)}*\n`;
+          ozet += ozelKullan ? `🎁 *Size özel indirim %${indirimOrani}: -${fmt(indirimTL)}*\n`
+            : paketKullan ? `📦 *Paket indirimi (${paket.ad}) %${indirimOrani}: -${fmt(indirimTL)}*\n`
+            : `${tierMusteri.emoji} *${tierMusteri.label} indirimi %${indirimOrani}: -${fmt(indirimTL)}*\n`;
           ozet += `✅ Ödenecek tutar: *${fmt(ucret)}*\n\n`;
         } else {
           ozet += `💰 Toplam: *${fmt(ucret)}*\n\n`;
         }
-        const durumOrtak = { gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit, kalan, onOdeme, rezervId: rezervKayit?.id || null, ozelIndirimKullan: ozelKullan };
+        const durumOrtak = { gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit, kalan, onOdeme, rezervId: rezervKayit?.id || null, ozelIndirimKullan: ozelKullan,
+          fiyatKampanyaId: fiyatKampanya?.id || null, paketKampanyaId: paketKullan ? paket.id : null };
         if (onOdeme > 0) {
           ozet += `💳 Bekleme listesi ön ödemeniz: *-${fmt(onOdeme)}*\n`;
           ozet += kalan > 0 ? `➡️ Kalan ödenecek: *${fmt(kalan)}*\n\n` : `✅ Ön ödemeniz tutarı karşılıyor${fazla > 0 ? ` (fazla *${fmt(fazla)}* bakiyenize aktarılacak)` : ''}\n\n`;
@@ -1862,7 +2041,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           const priDolu = doluMu(secilen, 'primary', veri);
           const secDolu = doluMu(secilen, 'secondary', veri);
           if (priDolu && secDolu) {
-            await mesajGonder(tel, `⏳ *${secilen.ad}* şu an kirada.\n\nSıraya girmek ister misiniz? Slot açılınca size haber verilir 🔔\n\n*1* - 🔵 Primary sıraya gir\n*2* - 🟣 Secondary sıraya gir\n*iptal* - Vazgeç`);
+            await mesajGonder(tel, `⏳ *${secilen.ad}* şu an kirada.\n\nSıraya girmek ister misiniz? Slot açılınca size haber verilir 🔔\n\n*1* - 🔵 Primary sıraya gir\n*2* - 🟣 Secondary sıraya gir${elmasSecenek(musteri.id, veri)}\n*iptal* - Vazgeç`);
             bekleyenOnaylar.set(tel, { tip: 'rezerv_tip_bekle', musteriId: musteri.id, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad });
             return;
           }
@@ -1887,9 +2066,9 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             const musait = ((o.kopyalar?.length||0)+1) - kirada > 0;
             const pri = gunlukFiyat(o, 'primary');
             const sec = gunlukFiyat(o, 'secondary');
-            return `*${i+1}* ${musait?'✅':'⏳'} *${o.ad}* (${o.platform})\n   🔵 ${fmt(pri)}/gün  🟣 ${fmt(sec)}/gün`;
+            return `*${i+1}* ${musait?'✅':'⏳'} *${o.ad}* (${o.platform})${kampEtiket(o)}\n   🔵 ${fmt(pri)}/gün  🟣 ${fmt(sec)}/gün`;
           }).join('\n\n');
-          await mesajGonder(tel, `🎮 *Oyun Listesi (A-Z)*\n\n${liste}\n\n✅ Müsait  ⏳ Kirada`);
+          await mesajGonder(tel, `🎮 *Oyun Listesi (A-Z)*\n\n${kampanyaBaslik()}${liste}\n\n✅ Müsait  ⏳ Kirada`);
           bekleyenOnaylar.set(tel, { ...bekleyen, oyunIds: tumO.map(o=>o.id) });
           return;
         }
@@ -1909,7 +2088,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             const sec = gunlukFiyat(o, 'secondary');
             await mesajGonder(tel,
               `🎮 *${o.ad}* (${o.platform})\n\n` +
-              `${musait ? '✅ Müsait' : '⏳ Şu an kirada'}\n` +
+              `${musait ? '✅ Müsait' : '⏳ Şu an kirada'}${kampEtiket(o) ? ` · 🏷️ *%${oyunKampanyasi(o).oran} kampanya*` : ''}\n` +
               `🔵 Primary: ${fmt(pri)}/gün\n🟣 Secondary: ${fmt(sec)}/gün\n\n` +
               (musait ? `Kiralamak için *5* yazın 🎮` : `Sıraya girmek için *5* yazın 🎮`)
             );
@@ -1999,6 +2178,37 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         }
       }
 
+      // Primary iade sonrası: "Çevrimdışı Oynama'yı kapattınız mı?"
+      if (bekleyen.tip === 'iade_cevrimdisi_bekle') {
+        const evetMi = EVET.includes(metin) || ['biraktim', 'kapattim', 'yaptim', 'tamamdir', 'tamamladim', 'evet biraktim', 'evet kapattim'].includes(metin);
+        if (evetMi) {
+          bekleyenOnaylar.delete(tel);
+          const vC = await getVeri();
+          const kC = vC.kiralamalar.find(x => x.id === bekleyen.kiraId);
+          if (kC) {
+            if (!kC.kapanis) kC.kapanis = { gerekli: true, tarih: bugun(), adimlar: {}, tamam: false, kaynak: 'bot' };
+            kC.kapanis.musteriCevrimdisi = true;
+            kC.kapanis.musteriCevrimdisiTarih = bugun();
+            const adim = cevrimdisiAdimi(vC);
+            if (adim) kC.kapanis.adimlar = { ...(kC.kapanis.adimlar || {}), [adim]: true };
+            await setVeri(vC);
+          }
+          await mesajGonder(tel, `✅ Teşekkürler! Hesabı artık konsolunuzdan silebilirsiniz 🙏`);
+          await banaGonder(`✅ *Çevrimdışı Oynama kapatıldı*\n👤 ${bekleyen.musteriAd || musteriAd}\n🎮 ${bekleyen.oyunAd}${kC ? `\n🔑 Hesap: *${kiraHesabi(kC, vC)}*` : ''}\n\nMüşteri onayladı — şifreyi değiştirip tüm cihazlardan çıkış yapabilirsin 🔒`);
+          if (kC) await iadeSonrasiTavsiye(tel, musteri, musteriAd, vC, kC, vC.oyunlar.find(o => o.id === kC.oyunId));
+          return;
+        }
+        if (HAYIR.includes(metin) || ['henuz degil', 'henuz', 'yapmadim', 'kapatmadim', 'bilmiyorum', 'nasil', 'nasil yapilir'].includes(metin)) {
+          const deneme = (bekleyen.deneme || 0) + 1;
+          bekleyenOnaylar.set(tel, { ...bekleyen, deneme });
+          await mesajGonder(tel, CEVRIMDISI_ADIM + `\n\nTamamlayınca *evet* yazmanız yeterli 🙏`);
+          if (deneme === 1) await banaGonder(`⚠️ *Çevrimdışı Oynama henüz kapatılmadı*\n👤 ${bekleyen.musteriAd || musteriAd}\n🎮 ${bekleyen.oyunAd}\n\nMüşteri "henüz değil" dedi, adımlar tekrar gönderildi. Onaylayana kadar şifreyi değiştirme.`);
+          return;
+        }
+        // Başka bir şey yazdı → soruyu bırak, mesaj normal akışta işlensin (ör. 7 → yetkili)
+        bekleyenOnaylar.delete(tel);
+      }
+
       if (bekleyen.tip === 'iade_onay') {
         if (EVET.includes(metin)) {
           // Taze veri çek — stale veri sorunu önle
@@ -2012,6 +2222,8 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           if (iadeKira) {
             iadeKira.durum = 'teslim';
             iadeKira.teslimTarih = bugun();
+            // Hesap kapanış kontrol listesi — sitede Dashboard'da "Kapatılmamış hesaplar" olarak görünür
+            iadeKira.kapanis = { gerekli: true, tarih: bugun(), adimlar: {}, tamam: false, kaynak: 'bot' };
             // Oyun durumunu güncelle
             const oyunIade = veriIade.oyunlar.find(o => o.id === iadeKira.oyunId);
             if (oyunIade) {
@@ -2053,74 +2265,20 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               iadeMesaj += `🎁 *Erken İade Ödülü!*\nKalan süreniz için *${fmt(erkenIadeOdul)}* bakiyenize yüklendi 💰\n\n`;
             }
             if (iadeKira.tip === 'primary') {
-              iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen konsolunuzdan şu adımları uygulayın:\n\n`;
-              iadeMesaj += `*Ayarlar → Kullanıcılar ve Hesaplar → Diğer → Çevrimdışı Oynama → Devre Dışı Bırak*\n\n`;
-              iadeMesaj += `Bu adımı tamamladıktan sonra hesabı konsolunuzdan silebilirsiniz 🙏`;
+              iadeMesaj += CEVRIMDISI_ADIM + `\n\n❓ *Çevrimdışı Oynama'yı devre dışı bıraktınız mı?*\n*evet* → Bıraktım\n*hayır* → Henüz değil`;
             } else {
               iadeMesaj += `⚠️ *Önemli Hatırlatma:*\nLütfen hesabı konsolunuzdan silmeyi unutmayın 🙏`;
             }
             await mesajGonder(tel, iadeMesaj);
-            await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n🎯 ${iadeKira.tip}\n\n⚠️ Hesabı geri almayı unutma!`);
+            await banaGonder(`📦 *İADE BİLDİRİMİ*\n\n👤 ${musteriAd}\n🎮 ${oyun?.ad}\n🎯 ${iadeKira.tip}\n🔑 Hesap: *${kiraHesabi(iadeKira, veriIade)}*\n\n${iadeKira.tip === 'primary' ? '⏳ Müşteriye "Çevrimdışı Oynama\'yı kapattınız mı?" diye soruldu — cevabı sana iletilecek. Onaylamadan şifreyi değiştirme.\n\n' : ''}🔒 Şifreyi değiştirip tüm cihazlardan çıkış yapmayı unutma — sitede kontrol listesi Dashboard'da seni bekliyor.`);
 
-            // Tavsiye sistemi — müşterinin geçmiş kiralamaları dışındaki müsait oyunları öner
-            try {
-              await new Promise(r => setTimeout(r, 2000)); // 2 sn bekle
-              const kiraliOyunIds = new Set(veriIade.kiralamalar.filter(k => k.musteriId === musteri.id).map(k => k.oyunId));
-              // Collaborative filtering — aynı oyunları kiralayan müşterilerin tercihlerini baz al
-              const benzerlik = new Map();
-              veriIade.kiralamalar.forEach(k => {
-                if (k.musteriId === musteri.id) return;
-                if (kiraliOyunIds.has(k.oyunId)) benzerlik.set(k.musteriId, (benzerlik.get(k.musteriId)||0)+1);
-              });
-              const colSkor = new Map();
-              veri.kiralamalar.forEach(k => {
-                if (k.musteriId === musteri.id || kiraliOyunIds.has(k.oyunId)) return;
-                const b = benzerlik.get(k.musteriId)||0;
-                if (b > 0) colSkor.set(k.oyunId, (colSkor.get(k.oyunId)||0)+b);
-              });
-              const popSkor = new Map();
-              veri.kiralamalar.forEach(k => {
-                if (!kiraliOyunIds.has(k.oyunId)) {
-                  if (!popSkor.has(k.oyunId)) popSkor.set(k.oyunId, new Set());
-                  popSkor.get(k.oyunId).add(k.musteriId);
-                }
-              });
-              const musaitOneriler = veri.oyunlar.filter(o =>
-                !o.deaktif &&
-                (!o.cikis || o.cikis <= bugun()) &&
-                o.id !== iadeKira.oyunId &&
-                !kiraliOyunIds.has(o.id)
-              ).map(o => ({
-                oyun: o,
-                skor: (colSkor.get(o.id)||0)*3 + (popSkor.has(o.id)?popSkor.get(o.id).size:0)
-              }))
-              .filter(s => s.skor > 0)
-              .sort((a, b) => b.skor - a.skor)
-              .slice(0, 3)
-              .map(s => s.oyun);
-
-              // Skor yoksa popülerliğe göre fallback
-              const oneriler = musaitOneriler.length > 0 ? musaitOneriler :
-                veri.oyunlar.filter(o => !o.deaktif && (!o.cikis||o.cikis<=bugun()) && o.id !== iadeKira.oyunId && !kiraliOyunIds.has(o.id))
-                  .sort((a,b) => (b.kiralamaSayisi||0)-(a.kiralamaSayisi||0)).slice(0,3);
-
-              if (oneriler.length > 0) {
-                let tavsiyeMesaj = `🎮 *Sana Özel Öneriler*\n\n`;
-                tavsiyeMesaj += `*${oyun?.ad}* oyununu bitirdin, teşekkürler! 🙏\n\nBeğenebileceğini düşündüğümüz oyunlar:\n\n`;
-                oneriler.forEach((o, i) => {
-                  const aktifler = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif');
-                  const priMusait = aktifler.filter(k => k.tip==='primary').length < (o.ciftPrimary ? 2 : 1);
-                  const secMusait = aktifler.filter(k => k.tip==='secondary').length < 1;
-                  const durum = (priMusait || secMusait) ? '✅ Müsait' : '⏳ Sıraya girebilirsin';
-                  const pri = gunlukFiyat(o, 'primary');
-                  const sec = gunlukFiyat(o, 'secondary');
-                  tavsiyeMesaj += `*${i+1}* - 🎮 ${o.ad} (${o.platform})\n   ${durum} | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün\n\n`;
-                });
-                tavsiyeMesaj += `Hemen kiralamak için numara yaz 👆\nVeya *menü* yaz 😊`;
-                await mesajGonder(tel, tavsiyeMesaj);
-                bekleyenOnaylar.set(tel, { tip: 'tavsiye_secim', musteriId: musteri.id, musteriAd, oneriler });
-              }
-            } catch(e) { console.error('Tavsiye hatası:', e.message); }
+            if (iadeKira.tip === 'primary') {
+              // Primary: müşteriye "Çevrimdışı Oynama'yı kapattınız mı?" sorusu soruldu — cevap bekleniyor
+              bekleyenOnaylar.set(tel, { tip: 'iade_cevrimdisi_bekle', kiraId: iadeKira.id, musteriId: iadeMusteriId, musteriAd, oyunAd: oyun?.ad || '', deneme: 0 });
+            } else {
+              await iadeSonrasiTavsiye(tel, musteri, musteriAd, veriIade, iadeKira, oyun);
+            }
+            return; // aşağıdaki silme, yeni kurulan soru / öneri durumunu silmesin
           }
         } else if (HAYIR.includes(metin) || metin === 'iptal') {
           bekleyenOnaylar.delete(tel);
@@ -2259,7 +2417,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           const musait = ((o.kopyalar?.length||0)+1) - kirada > 0;
           const pri = gunlukFiyat(o, 'primary');
           const sec = gunlukFiyat(o, 'secondary');
-          return `*${i+1}* ${musait?'✅':'⏳'} *${o.ad}* (${o.platform})\n   🔵 ${fmt(pri)}/gün  🟣 ${fmt(sec)}/gün`;
+          return `*${i+1}* ${musait?'✅':'⏳'} *${o.ad}* (${o.platform})${kampEtiket(o)}\n   🔵 ${fmt(pri)}/gün  🟣 ${fmt(sec)}/gün`;
         }).join('\n\n');
         return { liste, tumO };
       }
@@ -2326,33 +2484,33 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const s = slotDurumu(o);
         const priLabel = s.priMusait ? `🔵${fmt(pri)}/gün` : `🔵dolu`;
         const secLabel = s.secMusait ? `🟣${fmt(sec)}/gün` : `🟣dolu`;
-        liste += `*${i+1}* - ✅ ${o.ad} (${o.platform}) | ${priLabel}  ${secLabel}\n`;
+        liste += `*${i+1}* - ✅ ${o.ad} (${o.platform})${kampEtiket(o)} | ${priLabel}  ${secLabel}\n`;
       });
+      // Numaralar tek sırada devam eder: müsait → kirada (sıraya gir) → yakında çıkacak (ön rezervasyon)
+      let no = musaitOyunlar.length;
       if (kiradaOyunlar.length > 0) {
-        liste += `\n⏳ *Şu an kirada (sıraya girebilirsin):*\n`;
+        liste += `\n⏳ *Şu an kirada — seçersen sıraya girersin:*\n`;
         kiradaOyunlar.forEach(o => {
           const pri = gunlukFiyat(o, 'primary');
           const sec = gunlukFiyat(o, 'secondary');
           const siradaki = (veri.rezervasyonlar||[]).filter(r => r.oyunId === o.id && r.durum === 'bekliyor').length;
-          liste += `❌ ${o.ad} (${o.platform}) | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün${siradaki > 0 ? ` | 👥 ${siradaki} kişi sırada` : ''}\n`;
+          liste += `*${++no}* - ⏳ ${o.ad} (${o.platform})${kampEtiket(o)} | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün${siradaki > 0 ? ` | 👥 ${siradaki} kişi sırada` : ''}\n`;
         });
       }
-
-      if (!liste) { await mesajGonder(tel, `Şu an müsait oyun bulunmuyor 😔`); return; }
-      await mesajGonder(tel, `🎮 *Oyun Listesi*\n\n${liste}\nKiralamak veya sıraya girmek istediğiniz oyunun adını ya da numarasını yazın.`);
-      // Çıkacak oyunları da göster — ön rezervasyon için
+      // Yakında çıkacak oyunlar — seçilince ön rezervasyon (sıraya girme) akışına gider
       if (cikacakOyunlarKira.length > 0) {
-        liste += `\n🗓 *Yakında Çıkacak (Ön Rezervasyon):*\n`;
+        liste += `\n🗓 *Yakında çıkıyor — seçersen çıkış günü için yerini ayırtırsın:*\n`;
         cikacakOyunlarKira.forEach(o => {
           const pri = gunlukFiyat(o, 'primary');
           const sec = gunlukFiyat(o, 'secondary');
           const siradaki = (veri.rezervasyonlar||[]).filter(r => r.oyunId === o.id && r.durum === 'bekliyor').length;
-          liste += `📅 ${o.ad} (${o.platform}) — Çıkış: ${fmtTarih(o.cikis)} | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün${siradaki > 0 ? ` | 👥 ${siradaki} sırada` : ''}\n`;
+          liste += `*${++no}* - 📅 ${o.ad} (${o.platform}) — *${fmtTarih(o.cikis)}* | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün${siradaki > 0 ? ` | 👥 ${siradaki} kişi sırada` : ''}\n`;
         });
-        liste += `\nÖn rezervasyon için *8* yazın 🎮`;
       }
 
-      bekleyenOnaylar.set(tel, { tip: 'kiralama_oyun_bekle', musteriId: musteri.id, musteriAd, musaitOyunlar, kiradaOyunlar });
+      if (!liste) { await mesajGonder(tel, `Şu an müsait oyun bulunmuyor 😔`); return; }
+      await mesajGonder(tel, `🎮 *Oyun Listesi*\n\n${kampanyaBaslik()}${liste}\nOyunun *numarasını* ya da adını yazın:\n✅ Müsaitse hemen kiralarsınız\n⏳ Kiradaysa sıraya girersiniz\n📅 Yakında çıkacaksa çıkış günü için yerinizi ayırtırsınız 🔔`);
+      bekleyenOnaylar.set(tel, { tip: 'kiralama_oyun_bekle', musteriId: musteri.id, musteriAd, musaitOyunlar, kiradaOyunlar, cikacakOyunlar: cikacakOyunlarKira });
       return;
     }
 
@@ -2391,6 +2549,18 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     }
 
     // 9 — Bakiye Yükle
+    // 💎 Elmas üyelik bilgisi + ödeme
+    if (metin === 'elmas' || metin.startsWith('elmas ') || metin.includes('elmas ol') || metin.includes('elmas uye')) {
+      if (elmasMi(musteri.id, veri)) {
+        await mesajGonder(tel, `💎 Zaten *Elmas* üyesin! Bekleme listelerinde önceliklisin, kiralamalarda *%${elmasEsik(veri).indirim} indirim* alıyorsun 🎉`);
+        return;
+      }
+      const gerekenE = elmasGereken(musteri.id, veri);
+      await mesajGonder(tel, elmasTanitim(musteri.id, veri) + `\n\n` + elmasOdemeBilgisi(gerekenE) + `\n\n❌ Vazgeçmek için *iptal* yazın.`);
+      bekleyenOnaylar.set(tel, { tip: 'bakiye_yukle_dekont', musteriId: musteri.id, musteriAd, elmas: true, gereken: gerekenE });
+      return;
+    }
+
     if (metin === '9' || metin.includes('bakiye') || metin.includes('bakiyem')) {
       const mBakiyeGor = veri.musteriler.find(m => m.id === musteri.id);
       const bakiyeMevcut = mBakiyeGor?.bakiye || 0;
@@ -2555,10 +2725,10 @@ async function gecikmeKontrol() {
     const gf = gunlukFiyat(o, k.tip);
     const musteriAdiG = ((m.ad||'') + ' ' + (m.soyad||'')).trim() || 'Değerli Müşteri';
     await mesajGonder(hedef,
-      `⚠️ *Gecikmiş İade*\n\nMerhaba *${musteriAdiG}*!\n\n*${o?.ad}* oyununuzun iade süresi *${gecGun} gün* geçti.\n💰 Gecikme ücreti: *${fmt(gf*gecGun)}*\n\n📦 İade için → *3* yazın\n🔄 Uzatmak için → *2* yazın\n\nLütfen en kısa sürede işlem yapın 🙏`
+      `⚠️ *Gecikmiş İade*\n\nMerhaba *${musteriAdiG}*!\n\n*${o?.ad}* oyununuzun iade süresi *${gecGun} gün* geçti.\n💰 Gecikme ücreti: *${fmt(listeFiyat(o, k.tip)*gecGun)}*\n\n📦 İade için → *3* yazın\n🔄 Uzatmak için → *2* yazın\n\nLütfen en kısa sürede işlem yapın 🙏`
     );
     bekleyenSet(m, { tip: 'bildirim_secim', kiraId: parseInt(k.id), musteriId: m.id, gunluk: gf });
-    gecikmeOzet.push(`• ${musteriAdiG} — ${o?.ad} (${gecGun}g, +${fmt(gf*gecGun)})`);
+    gecikmeOzet.push(`• ${musteriAdiG} — ${o?.ad} (${gecGun}g, +${fmt(listeFiyat(o, k.tip)*gecGun)})`);
     try { await db.collection('botState').doc(`uyari_${k.id}`).set({ tarih: now }); } catch(e) {}
     await new Promise(r => setTimeout(r, 1000));
   }
@@ -2597,7 +2767,7 @@ async function rezervSiraKontrol() {
     if (aktifSayisi >= maxSlot) continue; // slot dolu, geç
 
     // Slot müsait — sıradaki ilk kişiyi bul
-    // Platin+ üyeler sıranın başına geçer
+    // Elmas üyeler sıranın başına geçer
     const siralar = veri.rezervasyonlar
       .filter(r => r.oyunId === oyunId && r.tip === tip && r.durum === 'bekliyor' && !r.atla)
       .sort((a, b) => {
@@ -2631,7 +2801,7 @@ async function rezervSiraKontrol() {
     const musteriAd = m.ad || m.soyad || m.tel;
     const tipLabel = tip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
 
-    const oncelikMesaji = oncelikli ? `\n\n👑 *Platin+ Ayrıcalığı:* Sıra önceliğiniz sayesinde ilk bildirim size gönderildi! 24 saat öncelikli hakkınız var.` : '';
+    const oncelikMesaji = oncelikli ? `\n\n💎 *Elmas Ayrıcalığı:* Sıra önceliğiniz sayesinde ilk bildirim size gönderildi!` : '';
     const gf = gunlukFiyat(o, tip);
     const onOdemeBilgi = ilk.onOdeme > 0
       ? (ilk.onOdemeOnaylandi ? `\n\n💳 Daha önce ödediğiniz *${fmt(ilk.onOdeme)}* kiralama tutarından düşülecek.` : `\n\n💳 ${fmt(ilk.onOdeme)} ön ödemeniz onaylanınca tutardan düşülecek.`)
@@ -2643,7 +2813,7 @@ async function rezervSiraKontrol() {
     );
     bekleyenSet(m, { tip: 'kiralama_gun_bekle', musteriId: m.id, musteriAd: ((m.ad||'') + ' ' + (m.soyad||'')).trim() || musteriAd, oyunId: o.id, oyunAd: o.ad, kiraTip: tip, gunluk: gf, rezervId: ilk.id });
 
-    await banaGonder(`🔔 *Rezerv Bildirimi Gönderildi*\n• ${musteriAd} → ${o.ad} (${tipLabel})${oncelikli ? '\n👑 Platin+ öncelikli bildirim!' : ''}`);
+    await banaGonder(`🔔 *Rezerv Bildirimi Gönderildi*\n• ${musteriAd} → ${o.ad} (${tipLabel})${oncelikli ? '\n💎 Elmas öncelikli bildirim!' : ''}`);
 
     // Bildirim tarihini rezervasyona kaydet
     ilk.sonBildirimTarih = now;
@@ -2664,11 +2834,149 @@ const SAAT = {
   rezervBaslangic: 9, rezervBitis: 21,
 };
 let _zamanlayiciCalisiyor = false;
+// İade sonrası "Sana özel öneriler" mesajı (müşterinin geçmişine göre)
+async function iadeSonrasiTavsiye(tel, musteri, musteriAd, veriIade, iadeKira, oyun) {
+  const veri = veriIade;
+  try {
+              await new Promise(r => setTimeout(r, 2000)); // 2 sn bekle
+              const kiraliOyunIds = new Set(veriIade.kiralamalar.filter(k => k.musteriId === musteri.id).map(k => k.oyunId));
+              // Collaborative filtering — aynı oyunları kiralayan müşterilerin tercihlerini baz al
+              const benzerlik = new Map();
+              veriIade.kiralamalar.forEach(k => {
+                if (k.musteriId === musteri.id) return;
+                if (kiraliOyunIds.has(k.oyunId)) benzerlik.set(k.musteriId, (benzerlik.get(k.musteriId)||0)+1);
+              });
+              const colSkor = new Map();
+              veri.kiralamalar.forEach(k => {
+                if (k.musteriId === musteri.id || kiraliOyunIds.has(k.oyunId)) return;
+                const b = benzerlik.get(k.musteriId)||0;
+                if (b > 0) colSkor.set(k.oyunId, (colSkor.get(k.oyunId)||0)+b);
+              });
+              const popSkor = new Map();
+              veri.kiralamalar.forEach(k => {
+                if (!kiraliOyunIds.has(k.oyunId)) {
+                  if (!popSkor.has(k.oyunId)) popSkor.set(k.oyunId, new Set());
+                  popSkor.get(k.oyunId).add(k.musteriId);
+                }
+              });
+              const musaitOneriler = veri.oyunlar.filter(o =>
+                !o.deaktif &&
+                (!o.cikis || o.cikis <= bugun()) &&
+                o.id !== iadeKira.oyunId &&
+                !kiraliOyunIds.has(o.id)
+              ).map(o => ({
+                oyun: o,
+                skor: (colSkor.get(o.id)||0)*3 + (popSkor.has(o.id)?popSkor.get(o.id).size:0)
+              }))
+              .filter(s => s.skor > 0)
+              .sort((a, b) => b.skor - a.skor)
+              .slice(0, 3)
+              .map(s => s.oyun);
+
+              // Skor yoksa popülerliğe göre fallback
+              const oneriler = musaitOneriler.length > 0 ? musaitOneriler :
+                veri.oyunlar.filter(o => !o.deaktif && (!o.cikis||o.cikis<=bugun()) && o.id !== iadeKira.oyunId && !kiraliOyunIds.has(o.id))
+                  .sort((a,b) => (b.kiralamaSayisi||0)-(a.kiralamaSayisi||0)).slice(0,3);
+
+              if (oneriler.length > 0) {
+                let tavsiyeMesaj = `🎮 *Sana Özel Öneriler*\n\n`;
+                tavsiyeMesaj += `*${oyun?.ad}* oyununu bitirdin, teşekkürler! 🙏\n\nBeğenebileceğini düşündüğümüz oyunlar:\n\n`;
+                oneriler.forEach((o, i) => {
+                  const aktifler = veri.kiralamalar.filter(k => k.oyunId === o.id && k.durum === 'aktif');
+                  const priMusait = aktifler.filter(k => k.tip==='primary').length < (o.ciftPrimary ? 2 : 1);
+                  const secMusait = aktifler.filter(k => k.tip==='secondary').length < 1;
+                  const durum = (priMusait || secMusait) ? '✅ Müsait' : '⏳ Sıraya girebilirsin';
+                  const pri = gunlukFiyat(o, 'primary');
+                  const sec = gunlukFiyat(o, 'secondary');
+                  tavsiyeMesaj += `*${i+1}* - 🎮 ${o.ad} (${o.platform})${kampEtiket(o)}\n   ${durum} | 🔵${fmt(pri)} 🟣${fmt(sec)}/gün\n\n`;
+                });
+                tavsiyeMesaj += `Hemen kiralamak için numara yaz 👆\nVeya *menü* yaz 😊`;
+                await mesajGonder(tel, tavsiyeMesaj);
+                bekleyenOnaylar.set(tel, { tip: 'tavsiye_secim', musteriId: musteri.id, musteriAd, oneriler });
+              }
+  } catch(e) { console.error('Tavsiye hatası:', e.message); }
+}
+
+// Primary iadede müşteriye gönderilen çevrimdışı oynama talimatı
+const CEVRIMDISI_ADIM = `⚠️ *Önemli:* Lütfen konsolunuzdan şu adımı uygulayın:\n\n*Ayarlar → Kullanıcılar ve Hesaplar → Diğer → Çevrimdışı Oynama → Devre Dışı Bırak*\n\nBu adımı tamamladıktan sonra hesabı konsolunuzdan silebilirsiniz 🙏`;
+const KAPANIS_VARSAYILAN_PRI = ['Müşteri konsolda "Çevrimdışı Oynama"yı kapattı', 'Hesap şifresi değiştirildi', 'Tüm cihazlardan çıkış yapıldı'];
+// Sitedeki kontrol listesinde "çevrimdışı" geçen adım (müşteri onaylayınca otomatik işaretlenir)
+function cevrimdisiAdimi(veri) {
+  const l = veri && veri.ayarlar && veri.ayarlar.kapanisAdimlari && veri.ayarlar.kapanisAdimlari.primary;
+  const adimlar = Array.isArray(l) && l.length ? l : KAPANIS_VARSAYILAN_PRI;
+  return adimlar.find(a => sadeKomut(a).includes('cevrimdisi')) || null;
+}
+
+// ══════════════════════════════════════════
+// ☀️ SABAH ÖZETİ — her sabah işletmeciye tek mesaj (ayar: sitede Ayarlar → Sabah Özeti)
+// ══════════════════════════════════════════
+function sabahOzetiMetni(veri) {
+  const now = bugun(), dun = tarihEkle(now, -1), yarin = yarinStr(), ay = now.slice(0, 7);
+  const ks = veri.kiralamalar || [];
+  const isim = id => { const m = (veri.musteriler || []).find(x => x.id === id); return m ? (((m.ad || '') + ' ' + (m.soyad || '')).trim() || m.tel || '?') : '?'; };
+  const oyunAd = id => (veri.oyunlar || []).find(x => x.id === id)?.ad || '?';
+  const uzToplam = k => (k.uzatmalar || []).reduce((t, u) => t + (u.ucret || 0), 0);
+  // Dün: yeni kiralamalar (uzatmalar hariç) + dün yapılan uzatmalar + ek gelirler
+  const dunYeni = ks.filter(k => k.bas === dun);
+  const dunUzatma = ks.flatMap(k => (k.uzatmalar || []).filter(u => u.tarih === dun));
+  const dunEk = (veri.ekGelirler || []).filter(g => g.tarih === dun);
+  const dunGelir = dunYeni.reduce((t, k) => t + (k.net || 0) - uzToplam(k), 0) + dunUzatma.reduce((t, u) => t + (u.ucret || 0), 0) + dunEk.reduce((t, g) => t + (g.tutar || 0), 0);
+  const ayGelir = ks.filter(k => (k.bas || '').startsWith(ay)).reduce((t, k) => t + (k.net || 0), 0) + (veri.ekGelirler || []).filter(g => (g.tarih || '').startsWith(ay)).reduce((t, g) => t + (g.tutar || 0), 0);
+  const aktif = ks.filter(k => k.durum === 'aktif');
+  const bugunBiten = aktif.filter(k => k.bit === now);
+  const yarinBiten = aktif.filter(k => k.bit === yarin);
+  const geciken = aktif.filter(k => k.bit < now).sort((a, b) => a.bit.localeCompare(b.bit));
+  // Onay bekleyen işlemler (bellekteki bekleyenler — bot yeniden başlarsa sıfırlanır)
+  const onaylar = new Map();
+  for (const kaynak of [bekleyenOnaylar, onayBekleyenler]) {
+    for (const [key, v] of kaynak.entries()) {
+      if (!v || !ONAY_TIPLERI.includes(v.tip)) continue;
+      if (kaynak === bekleyenOnaylar && !kaynak.get(key)) continue; // süresi dolmuş
+      const no = String(key).replace('@c.us', '').replace('@lid', '');
+      if (onaylar.has(no)) continue;
+      const etiket = v.tip === 'qr_onay_bekle' ? `QR girişi · *#tamam ${no}*` : `${v.tip === 'uzatma_isletmeci_bekle' ? 'Uzatma' : 'Kiralama'} · *#onayla ${no}*`;
+      onaylar.set(no, `• ${v.musteriAd || isim(v.musteriId)} — ${v.oyunAd || ''} (${etiket})`);
+    }
+  }
+  const onOdemeOnaysiz = (veri.rezervasyonlar || []).filter(r => r.durum === 'bekliyor' && r.onOdeme > 0 && !r.onOdemeOnaylandi);
+  const kapanis = ks.filter(k => k.durum === 'teslim' && k.kapanis && k.kapanis.gerekli && !k.kapanis.tamam);
+  const bugunCikan = (veri.oyunlar || []).filter(o => o.cikis === now);
+  const kampanyalar = (veri.kampanyalar || []).filter(k => kampanyaAktifMi(k, now));
+  const bitenKampanya = (veri.kampanyalar || []).filter(k => !k.iptal && k.bitis === now);
+
+  let t = `☀️ *Günaydın! Sabah Özeti* — ${fmtTarih(now)}\n\n`;
+  t += `💰 Dün: *${fmt(dunGelir)}* (${dunYeni.length} yeni kiralama${dunUzatma.length ? `, ${dunUzatma.length} uzatma` : ''})\n`;
+  t += `📈 Bu ay: *${fmt(ayGelir)}* · 🎮 Kirada: ${aktif.length}\n`;
+  t += `\n⏰ *Bugün biten (${bugunBiten.length})*`;
+  t += bugunBiten.length ? '\n' + bugunBiten.slice(0, 10).map(k => `• ${isim(k.musteriId)} — ${oyunAd(k.oyunId)} (${k.tip})`).join('\n') + (bugunBiten.length > 10 ? `\n• ...+${bugunBiten.length - 10}` : '') : ' — yok';
+  t += `\n🔔 Yarın biten: ${yarinBiten.length}`;
+  if (geciken.length) t += `\n\n⚠️ *Geciken (${geciken.length})*\n` + geciken.slice(0, 8).map(k => `• ${isim(k.musteriId)} — ${oyunAd(k.oyunId)} (${gunFarki(k.bit, now)}g)`).join('\n') + (geciken.length > 8 ? `\n• ...+${geciken.length - 8}` : '');
+  if (onaylar.size) t += `\n\n🧾 *Onay bekleyen (${onaylar.size})*\n` + [...onaylar.values()].slice(0, 10).join('\n');
+  if (onOdemeOnaysiz.length) t += `\n\n💳 Onaylanmamış bekleme listesi ön ödemesi: *${onOdemeOnaysiz.length}* (sitede Bekleme Listesi'nden onayla)`;
+  if (kapanis.length) t += `\n\n🔒 *Kapatılmamış hesap: ${kapanis.length}*\n` + kapanis.slice(0, 6).map(k => `• ${oyunAd(k.oyunId)} — 🔑 ${kiraHesabi(k, veri)} (iade ${fmtTarih(k.teslimTarih)})${k.tip === 'primary' && k.kapanis.kaynak === 'bot' ? (k.kapanis.musteriCevrimdisi ? ' · müşteri çevrimdışını kapattı ✓' : ' · ⚠️ müşteri çevrimdışını kapattığını onaylamadı') : ''}`).join('\n');
+  if (bugunCikan.length) t += `\n\n🚀 *Bugün çıkan:* ` + bugunCikan.map(o => `${o.ad} (${(veri.rezervasyonlar || []).filter(r => r.oyunId === o.id && r.durum === 'bekliyor').length} kişi sırada)`).join(', ');
+  if (kampanyalar.length) t += `\n\n🏷️ *Aktif kampanya:* ` + kampanyalar.map(k => `${k.ad} %${k.oran} (${fmtTarih(k.bitis)}'e kadar)`).join(', ');
+  if (bitenKampanya.length) t += `\n⏳ Bugün son günü: ` + bitenKampanya.map(k => k.ad).join(', ');
+  return t;
+}
+async function sabahOzetiKontrol() {
+  const veri = await getVeri(); if (!veri) return;
+  const ayar = (veri.ayarlar && veri.ayarlar.sabahOzeti) || {};
+  if (ayar.aktif === false) return;
+  const saat = Number.isFinite(+ayar.saat) ? +ayar.saat : 10;
+  if (trSaat() < saat || trSaat() >= 22) return;
+  const key = `sabah_${bugun()}`;
+  if (await bildirimGittiMi(key)) return;
+  await bildirimGittiIsaretle(key); // önce işaretle — hata olursa da tekrar tekrar göndermesin
+  await banaGonder(sabahOzetiMetni(veri));
+}
+
 async function zamanlayici() {
   if (_zamanlayiciCalisiyor) return;
   _zamanlayiciCalisiyor = true;
   try {
     const saat = trSaat();
+    try { await sabahOzetiKontrol(); } catch (e) { console.error('Sabah özeti hatası:', e.message); }
     if (saat >= SAAT.bitisBildirimi && saat < 22) {
       await yarinBitenKontrol();
       await bugunBitenKontrol();
@@ -2693,7 +3001,7 @@ function hatirlatmaMesaji(k, m, o) {
   const secenek = `📦 *İade etmek için* → *3* yazın\n🔄 *Uzatmak için* → *2* yazın`;
   if (k.bit < now) {
     const gec = gunFarki(k.bit, now);
-    return { tur: 'gecikme', metin: `⚠️ *Gecikmiş İade*\n\nMerhaba *${ad}*!\n\n*${o?.ad || 'Oyun'}* oyununuzun iade süresi *${gec} gün* geçti.\n💰 Gecikme ücreti: *${fmt(gf * gec)}*\n\n${secenek}\n\nLütfen en kısa sürede işlem yapın 🙏` };
+    return { tur: 'gecikme', metin: `⚠️ *Gecikmiş İade*\n\nMerhaba *${ad}*!\n\n*${o?.ad || 'Oyun'}* oyununuzun iade süresi *${gec} gün* geçti.\n💰 Gecikme ücreti: *${fmt(listeFiyat(o, k.tip) * gec)}*\n\n${secenek}\n\nLütfen en kısa sürede işlem yapın 🙏` };
   }
   if (k.bit === now) return { tur: 'bugun', metin: `⏰ *Süre Bugün Bitiyor!*\n\nMerhaba *${ad}*! *${o?.ad || 'Oyun'}* oyununuzun kiralama süresi *bugün* sona eriyor.\n\n${secenek}\n\nTeşekkürler! 🎮` };
   if (k.bit === yarinStr()) return { tur: 'yarin', metin: `🔔 *Hatırlatıcı*\n\nMerhaba *${ad}*!\n*${o?.ad || 'Oyun'}* oyununuz *yarın* bitiyor.\n\n${secenek} 🎮` };
@@ -2818,7 +3126,7 @@ app.get('/d/:token', async (req, res) => {
     }
     // Üyelik
     const ta = veri.tierAyarlar || {};
-    const esikler = [{ ad: 'Gümüş', t: ta.gumus ?? 750 }, { ad: 'Altın', t: ta.altin ?? 1500 }, { ad: 'Platin', t: ta.platin ?? 3000 }, { ad: 'Platin+', t: ta.platinplus ?? 5000 }];
+    const esikler = [{ ad: 'Gümüş', t: ta.gumus ?? 750 }, { ad: 'Altın', t: ta.altin ?? 1500 }, { ad: 'Platin', t: ta.platin ?? 3000 }, { ad: 'Elmas', t: ta.platinplus ?? 5000 }];
     const sonraki = esikler.find(e => tier.toplam < e.t);
     const onceki = [...esikler].reverse().find(e => tier.toplam >= e.t);
     const ilerleme = sonraki ? Math.round((tier.toplam - (onceki ? onceki.t : 0)) / (sonraki.t - (onceki ? onceki.t : 0)) * 100) : 100;
