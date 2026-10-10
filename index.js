@@ -203,6 +203,11 @@ function doluMu(oyun, tip, veri) {
   const aktif = veri.kiralamalar.filter(k => k.oyunId === oyun.id && k.durum === 'aktif' && k.tip === tip).length;
   return aktif >= slotKapasite(oyun, tip);
 }
+// Müşterinin bu oyun için bekleme listesindeki (onaylanmış) ön ödemesi
+function bekleyenOnOdemeBul(veri, musteriId, oyunId, tip, rezervId) {
+  const r = (veri.rezervasyonlar || []).filter(x => x.durum === 'bekliyor' && x.musteriId === musteriId && x.oyunId === oyunId);
+  return (rezervId && r.find(x => x.id === rezervId)) || r.find(x => x.tip === tip && x.onOdeme > 0) || r.find(x => x.onOdeme > 0) || r.find(x => x.tip === tip) || r[0] || null;
+}
 function slotKapasite(oyun, tip) {
   const kopyalar = (oyun?.kopyalar || []).filter(k => !k.satildi);
   return tip === 'primary'
@@ -242,7 +247,9 @@ function getMusteriTierBot(musteriId, veri) {
   // Bakiye yüklemelerini de dahil et (son 3 ay içindekiler)
   if (musteri && musteri.bakiyeGecmis) {
     musteri.bakiyeGecmis.forEach(b => {
-      if (b.tutar > 0 && b.tarih >= d3ayStr) toplam += b.tutar;
+      // Sadece gerçek para yüklemeleri (erken iade ödülü, iade, bekleme ön ödemesi aktarımı sayılmaz — site ile aynı)
+      const odul = b.tip === 'odul' || b.tip === 'iade' || b.tip === 'depozito' || /^Erken iade ödülü|^Silinen kiralama iadesi|^Bekleme/.test(b.aciklama || '');
+      if (b.tutar > 0 && !odul && b.tarih >= d3ayStr) toplam += b.tutar;
     });
   }
   // Eşikler Firebase'deki tierAyarlar'dan veya varsayılan
@@ -1098,7 +1105,25 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             ucret: (hedefBekleyen.ucret + (hedefBekleyen.indirim||0)), indirim: (hedefBekleyen.indirim||0), net: hedefBekleyen.ucret,
             onOdeme: hedefBekleyen.ucret, hediyeGun, notlar: 'Bot ile eklendi', durum: 'aktif',
             kopyaIdx, odemeTip: hedefBekleyen.odemeTip || 'havale', // bakiye ile ödenenler tier'da çift sayılmasın
+            ...(hedefBekleyen.onOdeme > 0 ? { rezervOnOdeme: hedefBekleyen.onOdeme, rezervId: hedefBekleyen.rezervId } : {}),
           });
+          // Bekleme listesi kaydını "kiralandı" yap (eskiden bot ile kiralayanlar listede "bekliyor" olarak kalıyordu)
+          let fazlaOnOdeme = 0;
+          (veri2.rezervasyonlar || []).forEach(r => {
+            if (r.durum !== 'bekliyor' || r.musteriId !== hedefBekleyen.musteriId || r.oyunId !== hedefBekleyen.oyunId) return;
+            const kullanilan = r.id === hedefBekleyen.rezervId && hedefBekleyen.onOdeme > 0;
+            if (r.onOdeme > 0 && !kullanilan) return; // başka bir ön ödemeli kayıt — dokunma
+            r.durum = 'kiralandi'; r.kiraId = yeniId; r.kiralamaTarih = bugun();
+            if (kullanilan) fazlaOnOdeme = Math.max(0, r.onOdeme - hedefBekleyen.ucret);
+          });
+          if (fazlaOnOdeme > 0) {
+            const mF = veri2.musteriler.find(m => m.id === hedefBekleyen.musteriId);
+            if (mF) {
+              mF.bakiye = (mF.bakiye || 0) + fazlaOnOdeme;
+              if (!mF.bakiyeGecmis) mF.bakiyeGecmis = [];
+              mF.bakiyeGecmis.push({ tarih: bugun(), tutar: fazlaOnOdeme, aciklama: `Bekleme ön ödemesi fazlası — ${hedefBekleyen.oyunAd}`, tip: 'depozito' });
+            }
+          }
           if (!veri2.nextId) veri2.nextId = {};
           veri2.nextId.k = yeniId + 1; // Sonraki için +1 kaydet
           // Oyun istatistiklerini güncelle
@@ -1121,7 +1146,10 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
           let onayMesaj = `✅ *Ödemeniz onaylandı!*\n\n🎮 *${hedefBekleyen.oyunAd}*\n📅 ${bas} → ${bit}`;
           if (hediyeGun > 0) onayMesaj += ` 🎁 *(+${hediyeGun} gün hediye)*`;
-          onayMesaj += `\n💰 ${fmt(hedefBekleyen.ucret)}\n\n`;
+          onayMesaj += `\n💰 ${fmt(hedefBekleyen.ucret)}`;
+          if (hedefBekleyen.onOdeme > 0) onayMesaj += ` (${fmt(Math.min(hedefBekleyen.onOdeme, hedefBekleyen.ucret))} ön ödemenizden karşılandı)`;
+          if (fazlaOnOdeme > 0) onayMesaj += `\n💳 Fazla ön ödeme *${fmt(fazlaOnOdeme)}* bakiyenize aktarıldı`;
+          onayMesaj += `\n\n`;
           if (siradaVarOnay) {
             onayMesaj += `⚠️ *Bu oyun için sıra mevcut!*\nUzatma hakkınız yalnızca *1 kez* kullanılabilir.\n\n`;
           }
@@ -1646,6 +1674,12 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const indirimOrani = tierMusteri.indirim || 0;
         const indirimTL = Math.round(hamUcret * indirimOrani / 100);
         const ucret = hamUcret - indirimTL;
+        // Bekleme listesinde ön ödeme yaptıysa kiralama tutarından düşülür
+        const rezervKayit = bekleyenOnOdemeBul(veri, musteri.id, bekleyen.oyunId, bekleyen.kiraTip, bekleyen.rezervId);
+        const onOdeme = (rezervKayit && rezervKayit.onOdeme > 0 && rezervKayit.onOdemeOnaylandi) ? rezervKayit.onOdeme : 0;
+        const onOdemeOnaysiz = (rezervKayit && rezervKayit.onOdeme > 0 && !rezervKayit.onOdemeOnaylandi) ? rezervKayit.onOdeme : 0;
+        const kalan = Math.max(0, ucret - onOdeme);
+        const fazla = Math.max(0, onOdeme - ucret);
         let ozet = `📋 *Kiralama Özeti*\n\n🎮 *${bekleyen.oyunAd}*\n🎯 ${bekleyen.kiraTip}\n📅 ${gun} gün`;
         if (hediye > 0) ozet += platinMi && yeniOyun ? ` *+${hediye} gün hediye 🎁 (💎 Platin ayrıcalığı)*` : ` *+${hediye} gün hediye 🎁*`;
         ozet += ` (${bas} → ${bit})\n`;
@@ -1656,18 +1690,36 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         } else {
           ozet += `💰 Toplam: *${fmt(ucret)}*\n\n`;
         }
-        // Bakiye kontrolü
+        const durumOrtak = { gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit, kalan, onOdeme, rezervId: rezervKayit?.id || null };
+        if (onOdeme > 0) {
+          ozet += `💳 Bekleme listesi ön ödemeniz: *-${fmt(onOdeme)}*\n`;
+          ozet += kalan > 0 ? `➡️ Kalan ödenecek: *${fmt(kalan)}*\n\n` : `✅ Ön ödemeniz tutarı karşılıyor${fazla > 0 ? ` (fazla *${fmt(fazla)}* bakiyenize aktarılacak)` : ''}\n\n`;
+        } else if (onOdemeOnaysiz > 0) {
+          ozet += `ℹ️ ${fmt(onOdemeOnaysiz)} ön ödemeniz henüz onaylanmadı; işletmeci onaylayınca hesaba katılır.\n\n`;
+        }
+        if (onOdeme > 0 && kalan === 0) {
+          // Ödenecek bir şey kalmadı → doğrudan işletmeci onayına
+          await mesajGonder(tel, ozet + `Kiralamanız işletmeci onayına gönderildi, kısa sürede başlayacak 🙏`);
+          bekleyenOnaylar.set(tel, { ...bekleyen, ...durumOrtak, tip: 'yeni_kiralama_bekle', odemeTip: 'onodeme' });
+          await banaGonder(
+            `💳 *ÖN ÖDEMEYLE KİRALAMA*\n\n👤 *${musteriAd}*\n🎮 *${bekleyen.oyunAd}* (${bekleyen.kiraTip})\n📅 ${gun} gün (${bas} → ${bit})\n` +
+            `💵 Tutar: ${fmt(ucret)} · Ön ödeme: ${fmt(onOdeme)}${fazla > 0 ? ` · Fazla ${fmt(fazla)} bakiyeye` : ''}\n\n` +
+            `Onaylamak için:\n*#onayla ${tel.replace('@c.us','').replace('@lid','')}*`
+          );
+          return;
+        }
+        // Bakiye kontrolü (sadece kalan tutar için)
         const mGuncel = veri.musteriler.find(m => m.id === bekleyen.musteriId);
         const mevcutBakiye = mGuncel?.bakiye || 0;
-        if (mevcutBakiye >= ucret) {
-          ozet += `💰 *Bakiyeniz yeterli!* (${fmt(mevcutBakiye)})\n\nBakiyenizden ödensin mi?\n*evet* → Bakiyeden öde\n*hayır* → Havale ile öde`;
+        if (mevcutBakiye >= kalan) {
+          ozet += `💰 *Bakiyeniz yeterli!* (${fmt(mevcutBakiye)})\n\n${fmt(kalan)} bakiyenizden ödensin mi?\n*evet* → Bakiyeden öde\n*hayır* → Havale ile öde`;
           await mesajGonder(tel, ozet);
-          bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'bakiye_onay', gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit });
+          bekleyenOnaylar.set(tel, { ...bekleyen, ...durumOrtak, tip: 'bakiye_onay' });
         } else {
           if (mevcutBakiye > 0) ozet += `💰 Mevcut bakiyeniz: *${fmt(mevcutBakiye)}*\n`;
-          ozet += `*Ödeme Bilgileri:*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\nÖdemeyi yaptıktan sonra dekontu buraya gönderin 📎`;
+          ozet += `*Ödeme Bilgileri:*\nTutar: *${fmt(kalan)}*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\nÖdemeyi yaptıktan sonra dekontu buraya gönderin 📎`;
           await mesajGonder(tel, ozet);
-          bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont', gun, hediye, toplamGun, ucret, indirim: indirimTL, bas, bit });
+          bekleyenOnaylar.set(tel, { ...bekleyen, ...durumOrtak, tip: 'yeni_kiralama_dekont' });
         }
         return;
       }
@@ -1678,23 +1730,24 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         if (EVET.includes(metin)) {
           const mBakiyeOde = veri.musteriler.find(m => m.id === bekleyen.musteriId);
           if (!mBakiyeOde) { await mesajGonder(tel, 'Bir hata oluştu, tekrar deneyin.'); return; }
-          if ((mBakiyeOde.bakiye||0) < bekleyen.ucret) {
+          const odenecek = bekleyen.kalan ?? bekleyen.ucret; // bekleme ön ödemesi düşülmüş tutar
+          if ((mBakiyeOde.bakiye||0) < odenecek) {
             await mesajGonder(tel, `❌ Bakiyeniz yetersiz (${fmt(mBakiyeOde.bakiye||0)}). Havale ile ödeme yapın:\n💳 ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`);
             bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont' });
             return;
           }
           // Bakiyeden düş
-          mBakiyeOde.bakiye = (mBakiyeOde.bakiye||0) - bekleyen.ucret;
+          mBakiyeOde.bakiye = (mBakiyeOde.bakiye||0) - odenecek;
           if (!mBakiyeOde.bakiyeGecmis) mBakiyeOde.bakiyeGecmis = [];
-          mBakiyeOde.bakiyeGecmis.push({ tarih: bugun(), tutar: -bekleyen.ucret, aciklama: `${bekleyen.oyunAd} kiralaması` });
+          mBakiyeOde.bakiyeGecmis.push({ tarih: bugun(), tutar: -odenecek, aciklama: `${bekleyen.oyunAd} kiralaması` });
           await setVeri(veri);
           // Direkt onayla — dekont yok
           bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_bekle', odemeTip: 'bakiye' });
-          await banaGonder(`💰 *Bakiyeden Ödeme*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd}\n💰 ${fmt(bekleyen.ucret)} bakiyeden düşüldü\n\n#onayla ${tel.replace(/[^0-9]/g,'').slice(-10)}`);
-          await mesajGonder(tel, `✅ *Bakiyenizden ${fmt(bekleyen.ucret)} düşüldü!*\n\nKalan bakiye: *${fmt(mBakiyeOde.bakiye)}*\n\nKiralamanız işleme alındı, kısa sürede onaylanacak 🙏`);
+          await banaGonder(`💰 *Bakiyeden Ödeme*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd}\n💰 ${fmt(odenecek)} bakiyeden düşüldü${bekleyen.onOdeme > 0 ? ` (+ ${fmt(bekleyen.onOdeme)} bekleme ön ödemesi)` : ''}\n\n#onayla ${tel.replace(/[^0-9]/g,'').slice(-10)}`);
+          await mesajGonder(tel, `✅ *Bakiyenizden ${fmt(odenecek)} düşüldü!*\n\nKalan bakiye: *${fmt(mBakiyeOde.bakiye)}*\n\nKiralamanız işleme alındı, kısa sürede onaylanacak 🙏`);
         } else if (HAYIR.includes(metin)) {
           bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont' });
-          await mesajGonder(tel, `Ödemeyi yaptıktan sonra dekontu gönderin 📸\n\n💳 IBAN: ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`);
+          await mesajGonder(tel, `Ödemeyi yaptıktan sonra dekontu gönderin 📸\n\n💵 Tutar: *${fmt(bekleyen.kalan ?? bekleyen.ucret)}*\n💳 IBAN: ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`);
         } else {
           await gecersizCevap(tel, `Bakiyenizden ödensin mi?\n*evet* → Bakiyeden öde\n*hayır* → Havale ile öde`);
         }
@@ -1711,7 +1764,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             `🎮 Oyun: *${bekleyen.oyunAd}*\n` +
             `🎯 Tip: ${bekleyen.kiraTip}\n` +
             `📅 ${bekleyen.gun} gün (${bekleyen.bas} → ${bekleyen.bit})\n` +
-            `💵 Tutar: *${fmt(bekleyen.ucret)}*\n\n` +
+            `💵 Tutar: *${fmt(bekleyen.ucret)}*` + (bekleyen.onOdeme > 0 ? ` (ön ödeme ${fmt(bekleyen.onOdeme)} düşüldü → havale: *${fmt(bekleyen.kalan)}*)` : '') + `\n\n` +
             `Onaylamak için:\n*#onayla ${tel.replace('@c.us','').replace('@lid','')}*`
           );
           return;
@@ -2556,9 +2609,16 @@ async function rezervSiraKontrol() {
     const tipLabel = tip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
 
     const oncelikMesaji = oncelikli ? `\n\n👑 *Platin+ Ayrıcalığı:* Sıra önceliğiniz sayesinde ilk bildirim size gönderildi! 24 saat öncelikli hakkınız var.` : '';
+    const gf = gunlukFiyat(o, tip);
+    const onOdemeBilgi = ilk.onOdeme > 0
+      ? (ilk.onOdemeOnaylandi ? `\n\n💳 Daha önce ödediğiniz *${fmt(ilk.onOdeme)}* kiralama tutarından düşülecek.` : `\n\n💳 ${fmt(ilk.onOdeme)} ön ödemeniz onaylanınca tutardan düşülecek.`)
+      : '';
+    // Eskiden "ödemeyi yapıp dekontu gönder" deniyordu ama tutar belli değildi ve bot dekontu beklemiyordu.
+    // Artık doğrudan gün sorulur; cevapla birlikte özet + kalan tutar + IBAN gönderilir.
     await mesajGonder(hedef,
-      `🎉 *Sıran Geldi!*\n\nMerhaba ${musteriAd}!\n\n*${o.ad}* için beklediğin slot artık müsait! ${tipLabel}${oncelikMesaji}\n\nKiralama için ödemeyi yapıp dekontu gönder, hemen aktifleştirelim 🚀\n\n💳 IBAN: ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`
+      `🎉 *Sıran Geldi!*\n\nMerhaba ${musteriAd}!\n\n*${o.ad}* için beklediğin slot artık müsait! ${tipLabel}${oncelikMesaji}\n💰 Günlük: ${fmt(gf)}${onOdemeBilgi}\n\n*Kaç gün kiralamak istersiniz?* (Min. 5 gün)\n\n_Vazgeçtiyseniz *iptal* yazabilirsiniz._`
     );
+    bekleyenSet(m, { tip: 'kiralama_gun_bekle', musteriId: m.id, musteriAd: ((m.ad||'') + ' ' + (m.soyad||'')).trim() || musteriAd, oyunId: o.id, oyunAd: o.ad, kiraTip: tip, gunluk: gf, rezervId: ilk.id });
 
     await banaGonder(`🔔 *Rezerv Bildirimi Gönderildi*\n• ${musteriAd} → ${o.ad} (${tipLabel})${oncelikli ? '\n👑 Platin+ öncelikli bildirim!' : ''}`);
 
