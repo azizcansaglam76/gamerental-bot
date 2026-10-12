@@ -2279,6 +2279,49 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         }
       }
 
+      // ⭐ İade sonrası puan
+      if (bekleyen.tip === 'puan_bekle') {
+        const p = puanCoz(metin, metinOrijinal);
+        const gec = ['gec', 'gecelim', 'pas', 'sonra', 'hayir', 'istemiyorum'].includes(metin);
+        if (p || gec) {
+          const vP = await getVeri();
+          const kP = vP.kiralamalar.find(x => x.id === bekleyen.kiraId);
+          const oP = vP.oyunlar.find(o => o.id === bekleyen.oyunId);
+          if (p && kP) { kP.puan = p; kP.puanTarih = bugun(); await setVeri(vP); }
+          if (p && p <= 2) {
+            bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'puan_yorum_bekle', puan: p });
+            await mesajGonder(tel, `Üzgünüz 🙏 Neyi beğenmediğini kısaca yazar mısın? Bir sonraki seçimini ona göre öneririz.\n\n_Geçmek için *geç* yaz_`);
+            await banaGonder(`⭐ *Düşük puan: ${p}/5*\n👤 ${bekleyen.musteriAd || musteriAd}\n🎮 ${bekleyen.oyunAd}\n(Yorum bekleniyor)`);
+            return;
+          }
+          bekleyenOnaylar.delete(tel);
+          await mesajGonder(tel, p ? `${'⭐'.repeat(p)} Teşekkürler! Puanın kaydedildi 🙏` : `Tamam 👍`);
+          if (kP) await iadeSonrasiTavsiye(tel, musteri, musteriAd, vP, kP, oP, p);
+          return;
+        }
+        // Başka bir şey yazdı → soruyu bırak, mesaj normal akışta işlensin
+        bekleyenOnaylar.delete(tel);
+      }
+      if (bekleyen.tip === 'puan_yorum_bekle') {
+        bekleyenOnaylar.delete(tel);
+        const menuMu = /^[1-9]$/.test(metin) || ['merhaba', 'selam', 'menu', 'ana menu'].includes(metin);
+        if (!menuMu) { // menü seçtiyse yorum yazmamış sayılır → mesaj normal akışta işlenir
+          const vY = await getVeri();
+          const kY = vY.kiralamalar.find(x => x.id === bekleyen.kiraId);
+          const oY = vY.oyunlar.find(o => o.id === bekleyen.oyunId);
+          const gec = ['gec', 'gecelim', 'pas', 'sonra', 'hayir', 'yok'].includes(metin);
+          if (!gec && metinOrijinal && !medya) {
+            if (kY) { kY.puanYorum = metinOrijinal.slice(0, 300); await setVeri(vY); }
+            await banaGonder(`💬 *Puan yorumu* (${bekleyen.puan}/5)\n👤 ${bekleyen.musteriAd || musteriAd}\n🎮 ${bekleyen.oyunAd}\n"${metinOrijinal.slice(0, 300)}"`);
+            await mesajGonder(tel, `Teşekkürler, iletildi 🙏`);
+          } else {
+            await mesajGonder(tel, `Tamam 👍`);
+          }
+          if (kY) await iadeSonrasiTavsiye(tel, musteri, musteriAd, vY, kY, oY, bekleyen.puan);
+          return;
+        }
+      }
+
       // Primary iade sonrası: "Çevrimdışı Oynama'yı kapattınız mı?"
       if (bekleyen.tip === 'iade_cevrimdisi_bekle') {
         const evetMi = EVET.includes(metin) || ['biraktim', 'kapattim', 'yaptim', 'tamamdir', 'tamamladim', 'evet biraktim', 'evet kapattim'].includes(metin);
@@ -2296,7 +2339,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           }
           await mesajGonder(tel, `✅ Teşekkürler! Hesabı artık konsolunuzdan silebilirsiniz 🙏`);
           await banaGonder(`✅ *Çevrimdışı Oynama kapatıldı*\n👤 ${bekleyen.musteriAd || musteriAd}\n🎮 ${bekleyen.oyunAd}${kC ? `\n🔑 Hesap: *${kiraHesabi(kC, vC)}*` : ''}\n\nMüşteri onayladı — şifreyi değiştirip tüm cihazlardan çıkış yapabilirsin 🔒`);
-          if (kC) await iadeSonrasiTavsiye(tel, musteri, musteriAd, vC, kC, vC.oyunlar.find(o => o.id === kC.oyunId));
+          if (kC) await puanSor(tel, musteri, musteriAd, kC, vC.oyunlar.find(o => o.id === kC.oyunId));
           return;
         }
         if (HAYIR.includes(metin) || ['henuz degil', 'henuz', 'yapmadim', 'kapatmadim', 'bilmiyorum', 'nasil', 'nasil yapilir'].includes(metin)) {
@@ -2403,7 +2446,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
               // Primary: müşteriye "Çevrimdışı Oynama'yı kapattınız mı?" sorusu soruldu — cevap bekleniyor
               bekleyenOnaylar.set(tel, { tip: 'iade_cevrimdisi_bekle', kiraId: iadeKira.id, musteriId: iadeMusteriId, musteriAd, oyunAd: oyun?.ad || '', deneme: 0 });
             } else {
-              await iadeSonrasiTavsiye(tel, musteri, musteriAd, veriIade, iadeKira, oyun);
+              await puanSor(tel, musteri, musteriAd, iadeKira, oyun);
             }
             return; // aşağıdaki silme, yeni kurulan soru / öneri durumunu silmesin
           }
@@ -2910,8 +2953,41 @@ const SAAT = {
   rezervBaslangic: 9, rezervBitis: 21,
 };
 let _zamanlayiciCalisiyor = false;
+// ── ⭐ İADE SONRASI PUAN ──
+function oyunPuanOrt(veri, oyunId) {
+  const p = (veri.kiralamalar || []).filter(k => k.oyunId === oyunId && k.puan >= 1 && k.puan <= 5);
+  return p.length ? { ort: p.reduce((t, k) => t + k.puan, 0) / p.length, n: p.length } : null;
+}
+// Öneri skoru çarpanı: müşteri iade ettiği oyunu beğendiyse aynı tür öne çıkar, beğenmediyse geri düşer;
+// diğer müşterilerin puanı yüksek oyunlar biraz öne çıkar
+function puanCarpani(veri, aday, iadeOyun, puan) {
+  let c = 1;
+  const ayniTur = aday.tur && iadeOyun && aday.tur === iadeOyun.tur && aday.tur !== 'Diğer';
+  if (ayniTur && puan >= 4) c *= 1.6;
+  if (ayniTur && puan && puan <= 2) c *= 0.4;
+  const o = oyunPuanOrt(veri, aday.id);
+  if (o && o.n >= 3) c *= 0.5 + o.ort / 5;
+  return c;
+}
+// Metinden 1-5 puanı çıkar ("5", "4/5", "5 puan", "⭐⭐⭐⭐")
+function puanCoz(metin, metinOrijinal) {
+  const yildiz = ((metinOrijinal || '').match(/⭐|★/g) || []).length;
+  if (yildiz >= 1 && yildiz <= 5 && !/\d/.test(metinOrijinal)) return yildiz;
+  const m = (metin || '').trim();
+  if (m.length > 12) return null;
+  const r = m.match(/^([1-5])(?:\s*\/?\s*5|\s*puan|\s*yildiz|\s*verdim)?$/); // sadeKomut '/' işaretini boşluğa çevirir: '4/5' → '4 5'
+  return r ? parseInt(r[1]) : null;
+}
+async function puanSor(tel, musteri, musteriAd, kira, oyun, onEk) {
+  await new Promise(r => setTimeout(r, 1500));
+  await mesajGonder(tel, (onEk || '') +
+    `⭐ *${oyun?.ad || 'Oyun'}* nasıldı?\n\n1'den 5'e bir puan verir misin?\n\n` +
+    `*5* 😍 Çok beğendim\n*4* 🙂 Beğendim\n*3* 😐 İdare eder\n*2* 🙁 Pek değil\n*1* 😞 Hiç beğenmedim\n\n_Geçmek için *geç* yaz_`);
+  bekleyenOnaylar.set(tel, { tip: 'puan_bekle', kiraId: kira.id, musteriId: musteri.id, musteriAd, oyunId: kira.oyunId, oyunAd: oyun?.ad || '' });
+}
+
 // İade sonrası "Sana özel öneriler" mesajı (müşterinin geçmişine göre)
-async function iadeSonrasiTavsiye(tel, musteri, musteriAd, veriIade, iadeKira, oyun) {
+async function iadeSonrasiTavsiye(tel, musteri, musteriAd, veriIade, iadeKira, oyun, puan) {
   const veri = veriIade;
   try {
               await new Promise(r => setTimeout(r, 2000)); // 2 sn bekle
@@ -2942,7 +3018,7 @@ async function iadeSonrasiTavsiye(tel, musteri, musteriAd, veriIade, iadeKira, o
                 !kiraliOyunIds.has(o.id)
               ).map(o => ({
                 oyun: o,
-                skor: (colSkor.get(o.id)||0)*3 + (popSkor.has(o.id)?popSkor.get(o.id).size:0)
+                skor: ((colSkor.get(o.id)||0)*3 + (popSkor.has(o.id)?popSkor.get(o.id).size:0)) * puanCarpani(veri, o, oyun, puan)
               }))
               .filter(s => s.skor > 0)
               .sort((a, b) => b.skor - a.skor)
@@ -3030,6 +3106,8 @@ function sabahOzetiMetni(veri) {
   if (onaylar.size) t += `\n\n🧾 *Onay bekleyen (${onaylar.size})*\n` + [...onaylar.values()].slice(0, 10).join('\n');
   if (onOdemeOnaysiz.length) t += `\n\n💳 Onaylanmamış bekleme listesi ön ödemesi: *${onOdemeOnaysiz.length}* (sitede Bekleme Listesi'nden onayla)`;
   if (kapanis.length) t += `\n\n🔒 *Kapatılmamış hesap: ${kapanis.length}*\n` + kapanis.slice(0, 6).map(k => `• ${oyunAd(k.oyunId)} — 🔑 ${kiraHesabi(k, veri)} (iade ${fmtTarih(k.teslimTarih)})${k.tip === 'primary' && k.kapanis.kaynak === 'bot' ? (k.kapanis.musteriCevrimdisi ? ' · müşteri çevrimdışını kapattı ✓' : ' · ⚠️ müşteri çevrimdışını kapattığını onaylamadı') : ''}`).join('\n');
+  const dunPuan = ks.filter(k => k.puan && k.puanTarih === dun);
+  if (dunPuan.length) t += `\n\n⭐ *Dün gelen puanlar (${dunPuan.length})* — ort. ${(dunPuan.reduce((a, k) => a + k.puan, 0) / dunPuan.length).toFixed(1)}\n` + dunPuan.slice(0, 6).map(k => `• ${oyunAd(k.oyunId)}: ${k.puan}/5${k.puanYorum ? ` — "${k.puanYorum.slice(0, 60)}"` : ''}`).join('\n');
   if (bugunCikan.length) t += `\n\n🚀 *Bugün çıkan:* ` + bugunCikan.map(o => `${o.ad} (${(veri.rezervasyonlar || []).filter(r => r.oyunId === o.id && r.durum === 'bekliyor').length} kişi sırada)`).join(', ');
   if (kampanyalar.length) t += `\n\n🏷️ *Aktif kampanya:* ` + kampanyalar.map(k => `${k.ad} %${k.oran} (${fmtTarih(k.bitis)}'e kadar)`).join(', ');
   if (bitenKampanya.length) t += `\n⏳ Bugün son günü: ` + bitenKampanya.map(k => k.ad).join(', ');
@@ -3146,6 +3224,37 @@ app.post('/api/kiralama-baslat', async (req, res) => {
   } catch (e) {
     console.error('kiralama-baslat:', e.message);
     return res.status(500).json({ hata: e.message });
+  }
+});
+
+// ⭐ Siteden iade alınınca: bot müşteriye puan sorusu gönderir. Gövde: { kiraId }
+app.post('/api/puan-iste', async (req, res) => {
+  if (!(await apiYetkiliMi(req.body))) return res.status(401).json({ hata: 'Yetkisiz' });
+  try {
+    const veri = await getVeri();
+    const k = veri.kiralamalar.find(x => x.id === Number(req.body.kiraId));
+    if (!k) return res.status(404).json({ hata: 'Kiralama bulunamadı' });
+    if (k.durum !== 'teslim') return res.json({ ok: false, atlandi: 'iade edilmemiş' });
+    if (k.puan) return res.json({ ok: false, atlandi: 'zaten puanlanmış' });
+    const m = veri.musteriler.find(x => x.id === k.musteriId);
+    const hedef = m && (m.whatsappLid || (m.tel ? temizTel(m.tel) + '@c.us' : null));
+    if (!hedef) return res.json({ ok: false, atlandi: 'telefon yok' });
+    const mevcut = bekleyenOnaylar.get(hedef) || (m.tel && bekleyenOnaylar.get(temizTel(m.tel) + '@c.us'));
+    if (mevcut && !['bildirim_secim', 'tavsiye_secim'].includes(mevcut.tip)) return res.json({ ok: false, atlandi: 'müşterinin yarım işlemi var' });
+    // Cevabı bot karşılasın — bu müşteri için "insan devraldı" susturmasını kaldır
+    const anahtarlar = [hedef, m.whatsappLid, m.tel ? temizTel(m.tel) + '@c.us' : null].filter(Boolean);
+    for (const [key] of insanDevraldi) {
+      if (anahtarlar.includes(key) || (m.tel && key.replace(/[^0-9]/g, '').endsWith(telSon10(m.tel).slice(-9)))) insanDevraldi.delete(key);
+    }
+    const o = veri.oyunlar.find(x => x.id === k.oyunId);
+    const musteriAd = ((m.ad || '') + ' ' + (m.soyad || '')).trim() || m.tel || 'Müşteri';
+    res.json({ ok: true });
+    await puanSor(hedef, m, musteriAd, k, o, `👋 Merhaba${m.ad ? ' *' + m.ad.trim() + '*' : ''}! *${o?.ad || 'Oyun'}* iadeni aldık, teşekkürler 🎮\n\n`);
+    const v = bekleyenOnaylar.get(hedef);
+    if (v && m.tel && m.whatsappLid) bekleyenOnaylar.set(temizTel(m.tel) + '@c.us', v);
+  } catch (e) {
+    console.error('puan-iste:', e.message);
+    if (!res.headersSent) res.status(500).json({ hata: e.message });
   }
 });
 
