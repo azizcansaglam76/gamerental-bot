@@ -390,14 +390,10 @@ async function kiralamaOzetiGonder(tel, musteri, musteriAd, veri, bekleyen, gun,
         }
         if (onOdeme > 0 && kalan === 0) {
           // Ödenecek bir şey kalmadı → doğrudan işletmeci onayına
-          await mesajGonder(tel, ozet + `Kiralamanız işletmeci onayına gönderildi, kısa sürede başlayacak 🙏`);
-          bekleyenOnaylar.set(tel, { ...bekleyen, ...durumOrtak, tip: 'yeni_kiralama_bekle', odemeTip: 'onodeme' });
-          await banaGonder(
-            `💳 *ÖN ÖDEMEYLE KİRALAMA*\n\n👤 *${musteriAd}*\n🎮 *${bekleyen.oyunAd}* (${bekleyen.kiraTip})\n📅 ${gun} gün (${bas} → ${bit})\n` +
-            `💵 Tutar: ${fmt(ucret)}${teminat > 0 ? ` + 🛡️ ${fmt(teminat)} teminat` : ''} · Ön ödeme: ${fmt(onOdeme)}${fazla > 0 ? ` · Fazla ${fmt(fazla)} bakiyeye` : ''}\n` +
-            (teminat > 0 ? `⚠️ Geç iade geçmişi: ${tmn.risk.metin}\n` : '') + `\n` +
-            `Onaylamak için:\n*#onayla ${tel.replace('@c.us','').replace('@lid','')}*`
-          );
+          // Ön ödeme işletmeci tarafından zaten onaylanmıştı → kiralama hemen başlar, QR istenir
+          await mesajGonder(tel, ozet.trim());
+          const vO = await getVeri();
+          await yeniKiralamaOnayla(tel, { ...bekleyen, ...durumOrtak, tip: 'yeni_kiralama_bekle', odemeTip: 'onodeme', otomatikNeden: `onaylı ön ödemeyle ödendi${fazla > 0 ? ', fazla ' + fmt(fazla) + ' bakiyeye' : ''}` }, vO, () => bekleyenOnaylar.delete(tel));
           return;
         }
         // Bakiye kontrolü (sadece kalan tutar için)
@@ -470,6 +466,120 @@ async function kiralamaListesiGonder(tel, musteri, musteriAd, veri, onEk) {
       await mesajGonder(tel, `${onEk || ''}🎮 *Oyun Listesi*\n\n${kampanyaBaslik()}${liste}\nOyunun *numarasını* ya da adını yazın:\n✅ Müsaitse hemen kiralarsınız\n⏳ Kiradaysa sıraya girersiniz\n📅 Yakında çıkacaksa çıkış günü için yerinizi ayırtırsınız 🔔`);
       bekleyenOnaylar.set(tel, { tip: 'kiralama_oyun_bekle', musteriId: musteri.id, musteriAd, musaitOyunlar, kiradaOyunlar, cikacakOyunlar: cikacakOyunlarKira });
       return;
+}
+
+// Yeni kiralamayı kaydeder, müşteriye onay + QR talimatı gönderir, işletmeciye bildirir.
+// #onayla ile ya da (bakiye / onaylı ön ödeme ile ödendiyse) otomatik çağrılır.
+// ekIslem: kiralama ile aynı yazmada uygulanacak değişiklik (ör. bakiyeden düşme)
+async function yeniKiralamaOnayla(hedefKey, hedefBekleyen, veri2, onayKaydiniSil, ekIslem) {
+          // Güvenli ID üretimi — mevcut max ID'den hesapla, race condition önlenir
+          const maxKiraId = veri2.kiralamalar.reduce((m, k) => Math.max(m, k.id || 0), 0);
+          const yeniId = Math.max(maxKiraId, veri2.nextId?.k || 0) + 1;
+          const bas = hedefBekleyen.bas || bugun();
+          const bit = hedefBekleyen.bit || tarihEkle(bas, hedefBekleyen.toplamGun || hedefBekleyen.gun);
+          const hediyeGun = hedefBekleyen.hediye || 0;
+          // Tier kontrolü — ÖNCE (kiralama eklenmeden)
+          const tierOncesi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
+          // Boş slotu olan kopyaya ata (eskiden hep ana hesaba yazılıyordu, kopyalı oyunlarda çakışma oluyordu)
+          const kopyaIdx = bosKopyaBul(veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId), hedefBekleyen.kiraTip, veri2);
+          veri2.kiralamalar.push({
+            id: yeniId, oyunId: hedefBekleyen.oyunId, musteriId: hedefBekleyen.musteriId,
+            tip: hedefBekleyen.kiraTip, bas, bit,
+            ucret: (hedefBekleyen.ucret + (hedefBekleyen.indirim||0)), indirim: (hedefBekleyen.indirim||0), net: hedefBekleyen.ucret,
+            onOdeme: hedefBekleyen.ucret, hediyeGun, notlar: 'Bot ile eklendi', durum: 'aktif',
+            kopyaIdx, odemeTip: hedefBekleyen.odemeTip || 'havale', // bakiye ile ödenenler tier'da çift sayılmasın
+            ...(hedefBekleyen.onOdeme > 0 ? { rezervOnOdeme: hedefBekleyen.onOdeme, rezervId: hedefBekleyen.rezervId } : {}),
+            ...(hedefBekleyen.fiyatKampanyaId ? { fiyatKampanyaId: hedefBekleyen.fiyatKampanyaId } : {}),
+            ...(hedefBekleyen.paketKampanyaId ? { paketKampanyaId: hedefBekleyen.paketKampanyaId } : {}),
+            ...(hedefBekleyen.teminat > 0 ? { teminat: hedefBekleyen.teminat, teminatDurum: 'tutuluyor' } : {}),
+          });
+          // Özel indirim kullanıldıysa işaretle (kampanya sonucunda "geri döndü" olarak sayılır)
+          if (hedefBekleyen.ozelIndirimKullan) {
+            const mOz = veri2.musteriler.find(m => m.id === hedefBekleyen.musteriId);
+            if (mOz && mOz.ozelIndirim) { mOz.ozelIndirim.kullanildi = true; mOz.ozelIndirim.kiraId = yeniId; }
+            const yk = veri2.kiralamalar.find(k => k.id === yeniId);
+            if (yk && mOz?.ozelIndirim?.kampanyaId) yk.kampanyaId = mOz.ozelIndirim.kampanyaId;
+          }
+          // Bekleme listesi kaydını "kiralandı" yap (eskiden bot ile kiralayanlar listede "bekliyor" olarak kalıyordu)
+          let fazlaOnOdeme = 0;
+          (veri2.rezervasyonlar || []).forEach(r => {
+            if (r.durum !== 'bekliyor' || r.musteriId !== hedefBekleyen.musteriId || r.oyunId !== hedefBekleyen.oyunId) return;
+            const kullanilan = r.id === hedefBekleyen.rezervId && hedefBekleyen.onOdeme > 0;
+            if (r.onOdeme > 0 && !kullanilan) return; // başka bir ön ödemeli kayıt — dokunma
+            r.durum = 'kiralandi'; r.kiraId = yeniId; r.kiralamaTarih = bugun();
+            if (kullanilan) fazlaOnOdeme = Math.max(0, r.onOdeme - hedefBekleyen.ucret - (hedefBekleyen.teminat || 0));
+          });
+          if (fazlaOnOdeme > 0) {
+            const mF = veri2.musteriler.find(m => m.id === hedefBekleyen.musteriId);
+            if (mF) {
+              mF.bakiye = (mF.bakiye || 0) + fazlaOnOdeme;
+              if (!mF.bakiyeGecmis) mF.bakiyeGecmis = [];
+              mF.bakiyeGecmis.push({ tarih: bugun(), tutar: fazlaOnOdeme, aciklama: `Bekleme ön ödemesi fazlası — ${hedefBekleyen.oyunAd}`, tip: 'depozito' });
+            }
+          }
+          if (!veri2.nextId) veri2.nextId = {};
+          veri2.nextId.k = yeniId + 1; // Sonraki için +1 kaydet
+          // Oyun istatistiklerini güncelle
+          const oyunStat = veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId);
+          if (oyunStat) {
+            oyunStat.kiralamaSayisi = (oyunStat.kiralamaSayisi || 0) + 1;
+            oyunStat.toplamGelir = (oyunStat.toplamGelir || 0) + hedefBekleyen.ucret;
+            oyunStat.durum = 'kirada';
+          }
+          if (ekIslem) ekIslem(veri2);
+          await setVeri(veri2);
+          onayKaydiniSil();
+          // Müşterinin diğer kimliğinde (LID / telefon) kalmış eski ödeme adımı kopyalarını temizle
+          {
+            const mK = veri2.musteriler.find(m => m.id === hedefBekleyen.musteriId);
+            const odemeAdimlari = ['kiralama_gun_bekle', 'bakiye_onay', 'yeni_kiralama_dekont', 'yeni_kiralama_bekle'];
+            [mK?.whatsappLid, mK?.tel ? temizTel(mK.tel) + '@c.us' : null].filter(k => k && k !== hedefKey).forEach(k => {
+              const v = bekleyenOnaylar.get(k);
+              if (v && odemeAdimlari.includes(v.tip)) bekleyenOnaylar.delete(k);
+              const v2 = onayBekleyenler.get(k);
+              if (v2 && odemeAdimlari.includes(v2.tip)) onayBekleyenler.delete(k);
+            });
+          }
+          // Tier kontrolü — SONRA
+          const tierSonrasi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
+          const tierAtladi = tierOncesi.seviye !== tierSonrasi.seviye;
+          // Sıra ve yeni oyun kontrolü
+          const siradaVarOnay = (veri2.rezervasyonlar||[]).some(r => r.oyunId === hedefBekleyen.oyunId && r.tip === hedefBekleyen.kiraTip && r.durum === 'bekliyor');
+          const oyunCikisOnay = veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId)?.cikis;
+          const birAyOnceOnay = new Date(); birAyOnceOnay.setMonth(birAyOnceOnay.getMonth() - 1);
+          const yeniOyunOnay = oyunCikisOnay && new Date(oyunCikisOnay) > birAyOnceOnay;
+
+          let onayMesaj = `✅ *Ödemeniz onaylandı!*\n\n🎮 *${hedefBekleyen.oyunAd}*\n📅 ${bas} → ${bit}`;
+          if (hediyeGun > 0) onayMesaj += ` 🎁 *(+${hediyeGun} gün hediye)*`;
+          onayMesaj += `\n💰 ${fmt(hedefBekleyen.ucret)}`;
+          if (hedefBekleyen.onOdeme > 0) onayMesaj += ` (${fmt(Math.min(hedefBekleyen.onOdeme, hedefBekleyen.ucret))} ön ödemenizden karşılandı)`;
+          if (fazlaOnOdeme > 0) onayMesaj += `\n💳 Fazla ön ödeme *${fmt(fazlaOnOdeme)}* bakiyenize aktarıldı`;
+          if (hedefBekleyen.teminat > 0) onayMesaj += `\n🛡️ *${fmt(hedefBekleyen.teminat)}* teminatınız tutuluyor — *${fmtTarih(bit)}* tarihinde iade edersen bakiyene eklenir`;
+          onayMesaj += `\n\n`;
+          if (siradaVarOnay) {
+            onayMesaj += `⚠️ *Bu oyun için sıra mevcut!*\nUzatma hakkınız yalnızca *1 kez* kullanılabilir.\n\n`;
+          }
+          if (yeniOyunOnay && siradaVarOnay) {
+            onayMesaj += `💡 *Erken İade Ödülü:* Oyunu erken iade ederseniz kalan sürenizin ücretinin *%10'u* bakiyenize yüklenir 🎁\n\n`;
+          }
+          onayMesaj += `📲 *Hesaba giriş için:*\n` +
+            `PlayStation'ınızda şu adımları takip edin:\n` +
+            `*1.* Ayarlar → Kullanıcılar ve Hesaplar\n` +
+            `*2.* Diğer → QR Koduyla Oturum Aç\n` +
+            `*3.* Açılan QR ekranının fotoğrafını buraya gönderin 📸\n\n` +
+            `QR'ı aldıktan sonra giriş işleminizi tamamlayacağız 🙏`;
+          // QR bekleme state'ini kaydet
+          bekleyenOnaylar.set(hedefKey, { tip: 'qr_bekle', oyunAd: hedefBekleyen.oyunAd, oyunId: hedefBekleyen.oyunId, musteriAd: hedefBekleyen.musteriAd, kiraId: yeniId });
+          if (tierAtladi) {
+            onayMesaj += `\n\n🎉 *Tebrikler!* ${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} *${tierSonrasi.label}* seviyesine yükseldin!`;
+            if (tierSonrasi.indirim > 0) onayMesaj += `\n✨ Artık *%${tierSonrasi.indirim} indirim* hakkın var!`;
+          }
+          await mesajGonder(hedefKey, onayMesaj);
+          if (tierAtladi) {
+            await banaGonder(`🏅 *Tier Değişimi*\n👤 ${hedefBekleyen.musteriAd}\n${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} ${tierSonrasi.label}`);
+          }
+          const yeniKiraHesap = kiraHesabi(veri2.kiralamalar.find(k => k.id === yeniId) || {}, veri2);
+          await banaGonder(`✅ Kiralama eklendi!${hedefBekleyen.otomatikNeden ? ` _(${hedefBekleyen.otomatikNeden} — otomatik onaylandı)_` : ''}\n🎮 ${hedefBekleyen.oyunAd}\n👤 ${hedefBekleyen.musteriAd}\n📅 ${bas} → ${bit}${hediyeGun > 0 ? ` (+${hediyeGun} gün hediye)` : ''}${yeniKiraHesap ? `\n🔑 Hesap: *${yeniKiraHesap}*` : ''}\n\n📲 QR bekleniyor — müşteri gönderince sana iletilecek.\nGiriş sonrası: *#tamam ${hedefKey.replace('@c.us','').replace('@lid','')}*`);
 }
 
 // ── ⏰ GEÇ İADE RİSKİ + 🛡️ TEMİNAT (site ile aynı kural) ──
@@ -700,14 +810,55 @@ const STATE_SURESI = {
 // İşletmeci onayı bekleyen işlemler (ödeme yapılmış). Müşteri bu arada başka bir menüye geçerse
 // bu kayıt kaybolmasın diye ayrı tutulur — #onayla her iki yerde de arar.
 const ONAY_TIPLERI = ['yeni_kiralama_bekle', 'uzatma_isletmeci_bekle', 'qr_onay_bekle'];
-const onayBekleyenler = new Map();
+// Not: bu iki harita bellekte; onay bekleyen kayıtlar ayrıca Firestore'a (botState/bekleyenOnaylar) yedeklenir
+// ve bot açılırken geri yüklenir — Railway yeniden başlatınca ödemesi yapılmış işlemler kaybolmasın.
+class KaliciMap extends Map {
+  set(k, v) { const r = super.set(k, v); onaylariKaydet(); return r; }
+  delete(k) { const r = super.delete(k); if (r) onaylariKaydet(); return r; }
+}
+const onayBekleyenler = new KaliciMap();
+let _onayKayitZamanlayici = null;
+function onaylariKaydet() {
+  clearTimeout(_onayKayitZamanlayici);
+  _onayKayitZamanlayici = setTimeout(async () => {
+    try {
+      const kayit = {};
+      for (const kaynak of [bekleyenOnaylar, onayBekleyenler]) {
+        for (const [k, v] of Map.prototype.entries.call(kaynak)) if (v && ONAY_TIPLERI.includes(v.tip) && !kayit[k]) kayit[k] = v;
+      }
+      await db.collection('botState').doc('bekleyenOnaylar').set({ liste: JSON.stringify(kayit), zaman: new Date().toISOString() });
+    } catch (e) { console.warn('Onay bekleyenler kaydedilemedi:', e.message); }
+  }, 1500);
+}
+async function onaylariGeriYukle() {
+  try {
+    const d = await db.collection('botState').doc('bekleyenOnaylar').get();
+    if (!d.exists) return;
+    const liste = JSON.parse(d.data().liste || '{}');
+    let n = 0;
+    for (const [k, v] of Object.entries(liste)) {
+      const sure = STATE_SURESI[v.tip] || STATE_SURESI.varsayilan;
+      if (v._ts && Date.now() - v._ts > sure) continue;
+      if (!bekleyenOnaylar.has(k)) { Map.prototype.set.call(bekleyenOnaylar, k, v); n++; }
+    }
+    if (n) console.log(`♻️ ${n} onay bekleyen işlem geri yüklendi`);
+  } catch (e) { console.warn('Onay bekleyenler yüklenemedi:', e.message); }
+}
 class SureliMap extends Map {
   set(k, v) {
     const mevcut = super.get(k);
     if (mevcut && ONAY_TIPLERI.includes(mevcut.tip) && !(v && ONAY_TIPLERI.includes(v.tip)) && !(v && v.tip === 'qr_bekle')) {
       onayBekleyenler.set(k, mevcut); // üzerine yazılmadan önce kenara al
     }
-    return super.set(k, v && typeof v === 'object' ? { ...v, _ts: Date.now() } : v);
+    const r = super.set(k, v && typeof v === 'object' ? { ...v, _ts: Date.now() } : v);
+    if ((v && ONAY_TIPLERI.includes(v.tip)) || (mevcut && ONAY_TIPLERI.includes(mevcut.tip))) onaylariKaydet();
+    return r;
+  }
+  delete(k) {
+    const mevcut = super.get(k);
+    const r = super.delete(k);
+    if (mevcut && ONAY_TIPLERI.includes(mevcut.tip)) onaylariKaydet();
+    return r;
   }
   get(k) {
     const v = super.get(k);
@@ -1368,102 +1519,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
 
         // Yeni kiralama onayla
         if (hedefBekleyen.tip === 'yeni_kiralama_bekle') {
-          // Güvenli ID üretimi — mevcut max ID'den hesapla, race condition önlenir
-          const maxKiraId = veri2.kiralamalar.reduce((m, k) => Math.max(m, k.id || 0), 0);
-          const yeniId = Math.max(maxKiraId, veri2.nextId?.k || 0) + 1;
-          const bas = hedefBekleyen.bas || bugun();
-          const bit = hedefBekleyen.bit || tarihEkle(bas, hedefBekleyen.toplamGun || hedefBekleyen.gun);
-          const hediyeGun = hedefBekleyen.hediye || 0;
-          // Tier kontrolü — ÖNCE (kiralama eklenmeden)
-          const tierOncesi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
-          // Boş slotu olan kopyaya ata (eskiden hep ana hesaba yazılıyordu, kopyalı oyunlarda çakışma oluyordu)
-          const kopyaIdx = bosKopyaBul(veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId), hedefBekleyen.kiraTip, veri2);
-          veri2.kiralamalar.push({
-            id: yeniId, oyunId: hedefBekleyen.oyunId, musteriId: hedefBekleyen.musteriId,
-            tip: hedefBekleyen.kiraTip, bas, bit,
-            ucret: (hedefBekleyen.ucret + (hedefBekleyen.indirim||0)), indirim: (hedefBekleyen.indirim||0), net: hedefBekleyen.ucret,
-            onOdeme: hedefBekleyen.ucret, hediyeGun, notlar: 'Bot ile eklendi', durum: 'aktif',
-            kopyaIdx, odemeTip: hedefBekleyen.odemeTip || 'havale', // bakiye ile ödenenler tier'da çift sayılmasın
-            ...(hedefBekleyen.onOdeme > 0 ? { rezervOnOdeme: hedefBekleyen.onOdeme, rezervId: hedefBekleyen.rezervId } : {}),
-            ...(hedefBekleyen.fiyatKampanyaId ? { fiyatKampanyaId: hedefBekleyen.fiyatKampanyaId } : {}),
-            ...(hedefBekleyen.paketKampanyaId ? { paketKampanyaId: hedefBekleyen.paketKampanyaId } : {}),
-            ...(hedefBekleyen.teminat > 0 ? { teminat: hedefBekleyen.teminat, teminatDurum: 'tutuluyor' } : {}),
-          });
-          // Özel indirim kullanıldıysa işaretle (kampanya sonucunda "geri döndü" olarak sayılır)
-          if (hedefBekleyen.ozelIndirimKullan) {
-            const mOz = veri2.musteriler.find(m => m.id === hedefBekleyen.musteriId);
-            if (mOz && mOz.ozelIndirim) { mOz.ozelIndirim.kullanildi = true; mOz.ozelIndirim.kiraId = yeniId; }
-            const yk = veri2.kiralamalar.find(k => k.id === yeniId);
-            if (yk && mOz?.ozelIndirim?.kampanyaId) yk.kampanyaId = mOz.ozelIndirim.kampanyaId;
-          }
-          // Bekleme listesi kaydını "kiralandı" yap (eskiden bot ile kiralayanlar listede "bekliyor" olarak kalıyordu)
-          let fazlaOnOdeme = 0;
-          (veri2.rezervasyonlar || []).forEach(r => {
-            if (r.durum !== 'bekliyor' || r.musteriId !== hedefBekleyen.musteriId || r.oyunId !== hedefBekleyen.oyunId) return;
-            const kullanilan = r.id === hedefBekleyen.rezervId && hedefBekleyen.onOdeme > 0;
-            if (r.onOdeme > 0 && !kullanilan) return; // başka bir ön ödemeli kayıt — dokunma
-            r.durum = 'kiralandi'; r.kiraId = yeniId; r.kiralamaTarih = bugun();
-            if (kullanilan) fazlaOnOdeme = Math.max(0, r.onOdeme - hedefBekleyen.ucret - (hedefBekleyen.teminat || 0));
-          });
-          if (fazlaOnOdeme > 0) {
-            const mF = veri2.musteriler.find(m => m.id === hedefBekleyen.musteriId);
-            if (mF) {
-              mF.bakiye = (mF.bakiye || 0) + fazlaOnOdeme;
-              if (!mF.bakiyeGecmis) mF.bakiyeGecmis = [];
-              mF.bakiyeGecmis.push({ tarih: bugun(), tutar: fazlaOnOdeme, aciklama: `Bekleme ön ödemesi fazlası — ${hedefBekleyen.oyunAd}`, tip: 'depozito' });
-            }
-          }
-          if (!veri2.nextId) veri2.nextId = {};
-          veri2.nextId.k = yeniId + 1; // Sonraki için +1 kaydet
-          // Oyun istatistiklerini güncelle
-          const oyunStat = veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId);
-          if (oyunStat) {
-            oyunStat.kiralamaSayisi = (oyunStat.kiralamaSayisi || 0) + 1;
-            oyunStat.toplamGelir = (oyunStat.toplamGelir || 0) + hedefBekleyen.ucret;
-            oyunStat.durum = 'kirada';
-          }
-          await setVeri(veri2);
-          onayKaydiniSil();
-          // Tier kontrolü — SONRA
-          const tierSonrasi = getMusteriTierBot(hedefBekleyen.musteriId, veri2);
-          const tierAtladi = tierOncesi.seviye !== tierSonrasi.seviye;
-          // Sıra ve yeni oyun kontrolü
-          const siradaVarOnay = (veri2.rezervasyonlar||[]).some(r => r.oyunId === hedefBekleyen.oyunId && r.tip === hedefBekleyen.kiraTip && r.durum === 'bekliyor');
-          const oyunCikisOnay = veri2.oyunlar.find(o => o.id === hedefBekleyen.oyunId)?.cikis;
-          const birAyOnceOnay = new Date(); birAyOnceOnay.setMonth(birAyOnceOnay.getMonth() - 1);
-          const yeniOyunOnay = oyunCikisOnay && new Date(oyunCikisOnay) > birAyOnceOnay;
-
-          let onayMesaj = `✅ *Ödemeniz onaylandı!*\n\n🎮 *${hedefBekleyen.oyunAd}*\n📅 ${bas} → ${bit}`;
-          if (hediyeGun > 0) onayMesaj += ` 🎁 *(+${hediyeGun} gün hediye)*`;
-          onayMesaj += `\n💰 ${fmt(hedefBekleyen.ucret)}`;
-          if (hedefBekleyen.onOdeme > 0) onayMesaj += ` (${fmt(Math.min(hedefBekleyen.onOdeme, hedefBekleyen.ucret))} ön ödemenizden karşılandı)`;
-          if (fazlaOnOdeme > 0) onayMesaj += `\n💳 Fazla ön ödeme *${fmt(fazlaOnOdeme)}* bakiyenize aktarıldı`;
-          if (hedefBekleyen.teminat > 0) onayMesaj += `\n🛡️ *${fmt(hedefBekleyen.teminat)}* teminatınız tutuluyor — *${fmtTarih(bit)}* tarihinde iade edersen bakiyene eklenir`;
-          onayMesaj += `\n\n`;
-          if (siradaVarOnay) {
-            onayMesaj += `⚠️ *Bu oyun için sıra mevcut!*\nUzatma hakkınız yalnızca *1 kez* kullanılabilir.\n\n`;
-          }
-          if (yeniOyunOnay && siradaVarOnay) {
-            onayMesaj += `💡 *Erken İade Ödülü:* Oyunu erken iade ederseniz kalan sürenizin ücretinin *%10'u* bakiyenize yüklenir 🎁\n\n`;
-          }
-          onayMesaj += `📲 *Hesaba giriş için:*\n` +
-            `PlayStation'ınızda şu adımları takip edin:\n` +
-            `*1.* Ayarlar → Kullanıcılar ve Hesaplar\n` +
-            `*2.* Diğer → QR Koduyla Oturum Aç\n` +
-            `*3.* Açılan QR ekranının fotoğrafını buraya gönderin 📸\n\n` +
-            `QR'ı aldıktan sonra giriş işleminizi tamamlayacağız 🙏`;
-          // QR bekleme state'ini kaydet
-          bekleyenOnaylar.set(hedefKey, { tip: 'qr_bekle', oyunAd: hedefBekleyen.oyunAd, oyunId: hedefBekleyen.oyunId, musteriAd: hedefBekleyen.musteriAd, kiraId: yeniId });
-          if (tierAtladi) {
-            onayMesaj += `\n\n🎉 *Tebrikler!* ${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} *${tierSonrasi.label}* seviyesine yükseldin!`;
-            if (tierSonrasi.indirim > 0) onayMesaj += `\n✨ Artık *%${tierSonrasi.indirim} indirim* hakkın var!`;
-          }
-          await mesajGonder(hedefKey, onayMesaj);
-          if (tierAtladi) {
-            await banaGonder(`🏅 *Tier Değişimi*\n👤 ${hedefBekleyen.musteriAd}\n${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} ${tierSonrasi.label}`);
-          }
-          const yeniKiraHesap = kiraHesabi(veri2.kiralamalar.find(k => k.id === yeniId) || {}, veri2);
-          await banaGonder(`✅ Kiralama eklendi!\n🎮 ${hedefBekleyen.oyunAd}\n👤 ${hedefBekleyen.musteriAd}\n📅 ${bas} → ${bit}${hediyeGun > 0 ? ` (+${hediyeGun} gün hediye)` : ''}${yeniKiraHesap ? `\n🔑 Hesap: *${yeniKiraHesap}*` : ''}\n\n📲 QR bekleniyor — müşteri gönderince sana iletilecek.\nGiriş sonrası: *#tamam ${hedefKey.replace('@c.us','').replace('@lid','')}*`);
+          await yeniKiralamaOnayla(hedefKey, hedefBekleyen, veri2, onayKaydiniSil);
           return;
         }
 
@@ -1652,7 +1708,9 @@ Açmak için: #ac [numara] veya #menu [numara]`);
     if (bekleyen?.tip === 'qr_bekle') {
       if (medya) {
         // QR görseli geldi — sana ilet
-        const musteriTelSade = tel.replace(/[^0-9]/g,'').slice(-10);
+        // LID ile yazan müşteride sohbet numarası telefon değildir — kayıtlı telefonu göster
+        const mQR = (veri?.musteriler || []).find(m => m.whatsappLid === tel || (bekleyen.musteriId && m.id === bekleyen.musteriId));
+        const musteriTelSade = (mQR && telSon10(mQR.tel)) || tel.replace(/[^0-9]/g,'').slice(-10);
         await banaGonder(
           `📲 *QR Kodu Geldi!*\n\n` +
           `👤 *${bekleyen.musteriAd}*\n` +
@@ -2032,15 +2090,26 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont' });
             return;
           }
-          // Bakiyeden düş
-          mBakiyeOde.bakiye = (mBakiyeOde.bakiye||0) - odenecek;
-          if (!mBakiyeOde.bakiyeGecmis) mBakiyeOde.bakiyeGecmis = [];
-          mBakiyeOde.bakiyeGecmis.push({ tarih: bugun(), tutar: -odenecek, aciklama: `${bekleyen.oyunAd} kiralaması` });
-          await setVeri(veri);
-          // Direkt onayla — dekont yok
-          bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_bekle', odemeTip: 'bakiye' });
-          await banaGonder(`💰 *Bakiyeden Ödeme*\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd}\n💰 ${fmt(odenecek)} bakiyeden düşüldü${bekleyen.onOdeme > 0 ? ` (+ ${fmt(bekleyen.onOdeme)} bekleme ön ödemesi)` : ''}${bekleyen.teminat > 0 ? `\n🛡️ ${fmt(bekleyen.teminat)} teminat dahil — ${bekleyen.riskMetin}` : ''}\n\n#onayla ${tel.replace(/[^0-9]/g,'').slice(-10)}`);
-          await mesajGonder(tel, `✅ *Bakiyenizden ${fmt(odenecek)} düşüldü!*\n\nKalan bakiye: *${fmt(mBakiyeOde.bakiye)}*\n\nKiralamanız işleme alındı, kısa sürede onaylanacak 🙏`);
+          // Slot hâlâ boş mu? (soru ile cevap arasında başkası kiralamış olabilir)
+          const vB = await getVeri();
+          const oB = vB.oyunlar.find(o => o.id === bekleyen.oyunId);
+          if (!oB || doluMu(oB, bekleyen.kiraTip, vB)) {
+            bekleyenOnaylar.delete(tel);
+            await mesajGonder(tel, `😔 Üzgünüz, *${bekleyen.oyunAd}* için ${bekleyen.kiraTip === 'primary' ? 'Primary' : 'Secondary'} slotu az önce doldu. Bakiyenizden bir şey düşülmedi.\n\nSıraya girmek için *5* yazıp oyunu seçebilirsiniz 🔔`);
+            await banaGonder(`⚠️ *Bakiyeden kiralama yapılamadı* — slot dolu\n👤 ${bekleyen.musteriAd}\n🎮 ${bekleyen.oyunAd} (${bekleyen.kiraTip})\nBakiyeden düşülmedi.`);
+            return;
+          }
+          // Bakiyeden düşme + kiralama kaydı TEK yazmada (eskiden bakiye düşüp kiralama işletmeci onayına kalıyordu;
+          // onay kaçınca ya da bot yeniden başlayınca para düşmüş ama kiralama yazılmamış oluyordu)
+          let kalanBakiye = 0;
+          await yeniKiralamaOnayla(tel, { ...bekleyen, tip: 'yeni_kiralama_bekle', odemeTip: 'bakiye', otomatikNeden: `bakiyeden ${fmt(odenecek)} ödendi` }, vB, () => bekleyenOnaylar.delete(tel), v => {
+            const mB = v.musteriler.find(m => m.id === bekleyen.musteriId);
+            mB.bakiye = (mB.bakiye || 0) - odenecek;
+            if (!mB.bakiyeGecmis) mB.bakiyeGecmis = [];
+            mB.bakiyeGecmis.push({ tarih: bugun(), tutar: -odenecek, aciklama: `${bekleyen.oyunAd} kiralaması` });
+            kalanBakiye = mB.bakiye;
+          });
+          await mesajGonder(tel, `💰 Bakiyenizden *${fmt(odenecek)}* düşüldü. Kalan bakiye: *${fmt(kalanBakiye)}*`);
         } else if (HAYIR.includes(metin)) {
           bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'yeni_kiralama_dekont' });
           await mesajGonder(tel, `Ödemeyi yaptıktan sonra dekontu gönderin 📸\n\n💵 Tutar: *${fmt(bekleyen.kalan ?? bekleyen.ucret)}*\n💳 IBAN: ${CONFIG.IBAN}\n👤 ${CONFIG.HESAP_ISIM}`);
@@ -3495,6 +3564,7 @@ app.post('/api/duyuru', async (req, res) => {
 });
 
 app.get('/', (req, res) => res.send('🎮 GameRental Bot çalışıyor!'));
+onaylariGeriYukle();
 app.listen(CONFIG.PORT, () => {
   console.log(`🚀 Port ${CONFIG.PORT} hazır`);
 });
