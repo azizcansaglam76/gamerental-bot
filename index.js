@@ -582,6 +582,39 @@ async function yeniKiralamaOnayla(hedefKey, hedefBekleyen, veri2, onayKaydiniSil
           await banaGonder(`✅ Kiralama eklendi!${hedefBekleyen.otomatikNeden ? ` _(${hedefBekleyen.otomatikNeden} — otomatik onaylandı)_` : ''}\n🎮 ${hedefBekleyen.oyunAd}\n👤 ${hedefBekleyen.musteriAd}\n📅 ${bas} → ${bit}${hediyeGun > 0 ? ` (+${hediyeGun} gün hediye)` : ''}${yeniKiraHesap ? `\n🔑 Hesap: *${yeniKiraHesap}*` : ''}\n\n📲 QR bekleniyor — müşteri gönderince sana iletilecek.\nGiriş sonrası: *#tamam ${hedefKey.replace('@c.us','').replace('@lid','')}*`);
 }
 
+// Tip seçimi: numaralar HER ZAMAN 1 = Primary, 2 = Secondary. Dolu olan da listede "dolu" diye görünür
+// (eskiden dolu tip listeden çıkarılıyordu; tek seçenek "*2*" kalınca müşteri "1" yazıp "Primary dolu" uyarısı alıyordu)
+function tipSecimMetni(o, priDolu, secDolu) {
+  const pri = gunlukFiyat(o, 'primary'), sec = gunlukFiyat(o, 'secondary');
+  let t = `Hangi tipi tercih edersiniz?\n\n`;
+  t += priDolu ? `*1* - 🔵 Primary — ⏳ şu an dolu\n` : `*1* - 🔵 Primary: ${fmt(pri)}/gün ✅\n`;
+  t += secDolu ? `*2* - 🟣 Secondary — ⏳ şu an dolu\n` : `*2* - 🟣 Secondary: ${fmt(sec)}/gün ✅\n`;
+  if (priDolu !== secDolu) t += `*3* - 🔔 ${priDolu ? 'Primary' : 'Secondary'} için sıraya gir\n`;
+  return t;
+}
+// Bekleme listesine doğrudan ekle (tip seçiminde "3 - sıraya gir" için)
+async function siradaYerAyir(tel, musteriId, musteriAd, oyunId, oyunAd, kiraTip) {
+  const v = await getVeri();
+  if (!v.rezervasyonlar) v.rezervasyonlar = [];
+  const tipLabel = kiraTip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
+  const zaten = v.rezervasyonlar.find(r => r.oyunId === oyunId && r.musteriId === musteriId && r.tip === kiraTip && r.durum === 'bekliyor');
+  bekleyenOnaylar.delete(tel);
+  if (zaten) {
+    const no = v.rezervasyonlar.filter(r => r.oyunId === oyunId && r.tip === kiraTip && r.durum === 'bekliyor' && r.id <= zaten.id).length;
+    await mesajGonder(tel, `ℹ️ *Zaten Sıradasınız!*\n\n*${oyunAd}* için ${tipLabel} sırasında ${no}. sıradasınız.\n\nSlot açılınca otomatik bildirim alacaksınız 🔔`);
+    return;
+  }
+  const once = v.rezervasyonlar.filter(r => r.oyunId === oyunId && r.tip === kiraTip && r.durum === 'bekliyor').length;
+  const yeniId = Math.max(v.rezervasyonlar.reduce((m, r) => Math.max(m, r.id || 0), 0), v.nextId?.r || 0) + 1;
+  if (!v.nextId) v.nextId = {};
+  v.nextId.r = yeniId + 1;
+  v.rezervasyonlar.push({ id: yeniId, oyunId, musteriId, tip: kiraTip, tarih: bugun(), notlar: 'Bot üzerinden eklendi', durum: 'bekliyor', alinantarih: bugun() });
+  await setVeri(v);
+  await mesajGonder(tel, `✅ *${oyunAd}* için sıraya girdiniz!\n\n${tipLabel}\n\nSlot açılınca size otomatik bildirim gönderilir 🔔`);
+  await banaGonder(`🔔 *Yeni Rezervasyon (Bot)*\n👤 ${musteriAd}\n🎮 ${oyunAd} (${tipLabel})\n📍 Sıra: ${once + 1}`);
+  if (once > 0 && !elmasMi(musteriId, v)) await mesajGonder(tel, `💎 Önünde ${once} kişi var. Beklemeden öne geçmek istersen *elmas* yaz.`);
+}
+
 // ── ⏰ GEÇ İADE RİSKİ + 🛡️ TEMİNAT (site ile aynı kural) ──
 // Son 10 iade: şu an gecikmiş kiralaması var, 2+ geç iade ya da bir kerede 3+ gün gecikme → yüksek risk
 function gecRiskBot(veri, musteriId) {
@@ -1871,10 +1904,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const aktif2 = veri.kiralamalar.filter(k => k.oyunId === secilen.id && k.durum === 'aktif');
         const priDolu = doluMu(secilen, 'primary', veri);   // kopyalar da sayılır
         const secDolu = doluMu(secilen, 'secondary', veri);
-        let tipSecim = `Hangi tipi tercih edersiniz?\n`;
-        if (!priDolu) tipSecim += `*1* - 🔵 Primary: ${fmt(pri)}/gün\n`;
-        if (!secDolu) tipSecim += `*2* - 🟣 Secondary: ${fmt(sec)}/gün\n`;
-        await mesajGonder(tel, `🎮 *${secilen.ad}* seçildi!\n\n${tipSecim}`);
+        await mesajGonder(tel, `🎮 *${secilen.ad}* seçildi!\n\n${tipSecimMetni(secilen, priDolu, secDolu)}`);
         bekleyenOnaylar.set(tel, { tip: 'kiralama_tip_bekle', musteriId: musteri.id, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad, priDolu, secDolu });
         return;
       }
@@ -2052,18 +2082,31 @@ Açmak için: #ac [numara] veya #menu [numara]`);
       }
 
       if (bekleyen.tip === 'kiralama_tip_bekle') {
-        let kiraTip = null;
-        if (metin.includes('primary') || metin === '1') kiraTip = 'primary';
-        else if (metin.includes('secondary') || metin === '2') kiraTip = 'secondary';
-        if (!kiraTip) { await gecersizCevap(tel, `*1* - 🔵 Primary\n*2* - 🟣 Secondary`); return; }
-        // Dolu mu kontrol et
-        if (kiraTip === 'primary' && bekleyen.priDolu) {
-          await mesajGonder(tel, `🔵 Primary dolu! Lütfen 🟣 Secondary seçin (*2*) veya sıraya girin.`); return;
-        }
-        if (kiraTip === 'secondary' && bekleyen.secDolu) {
-          await mesajGonder(tel, `🟣 Secondary dolu! Lütfen 🔵 Primary seçin (*1*) veya sıraya girin.`); return;
-        }
         const oyun = veri.oyunlar.find(o => o.id === bekleyen.oyunId);
+        // Doluluk liste gösterildiği anki değil, şu anki duruma göre
+        const priDolu = oyun ? doluMu(oyun, 'primary', veri) : !!bekleyen.priDolu;
+        const secDolu = oyun ? doluMu(oyun, 'secondary', veri) : !!bekleyen.secDolu;
+        if (priDolu && secDolu) {
+          await mesajGonder(tel, `⏳ *${bekleyen.oyunAd}* az önce tamamen doldu.\n\nSıraya girmek ister misiniz? Slot açılınca size haber verilir 🔔\n\n*1* - 🔵 Primary sıraya gir\n*2* - 🟣 Secondary sıraya gir${elmasSecenek(bekleyen.musteriId, veri)}\n*iptal* - Vazgeç`);
+          bekleyenOnaylar.set(tel, { tip: 'rezerv_tip_bekle', musteriId: bekleyen.musteriId, musteriAd: bekleyen.musteriAd || musteriAd, oyunId: bekleyen.oyunId, oyunAd: bekleyen.oyunAd });
+          return;
+        }
+        const doluTip = priDolu ? 'primary' : secDolu ? 'secondary' : null;
+        if (doluTip && (metin === '3' || metin.includes('sira'))) {
+          await siradaYerAyir(tel, bekleyen.musteriId, bekleyen.musteriAd || musteriAd, bekleyen.oyunId, bekleyen.oyunAd, doluTip);
+          return;
+        }
+        let kiraTip = null;
+        if (metin.includes('primary') || metin === '1' || metin === 'pri' || metin === 'prim') kiraTip = 'primary';
+        else if (metin.includes('secondary') || metin === '2' || metin === 'sec') kiraTip = 'secondary';
+        if (!kiraTip) { await gecersizCevap(tel, tipSecimMetni(oyun || {}, priDolu, secDolu)); return; }
+        if (kiraTip === doluTip) {
+          const dl = kiraTip === 'primary' ? '🔵 Primary' : '🟣 Secondary';
+          const bosTip = kiraTip === 'primary' ? 'secondary' : 'primary';
+          await mesajGonder(tel, `${dl} şu an dolu 😔\n\n*${bosTip === 'primary' ? 1 : 2}* - ${bosTip === 'primary' ? '🔵 Primary' : '🟣 Secondary'} kirala: ${fmt(gunlukFiyat(oyun || {}, bosTip))}/gün ✅\n*3* - 🔔 ${kiraTip === 'primary' ? 'Primary' : 'Secondary'} için sıraya gir`);
+          bekleyenOnaylar.set(tel, { ...bekleyen, priDolu, secDolu });
+          return;
+        }
         const gf = gunlukFiyat(oyun, kiraTip);
         await mesajGonder(tel, `*${kiraTip === 'primary' ? '🔵 Primary' : '🟣 Secondary'}* seçildi.\n💰 Günlük: ${fmt(gf)}\n\nKaç gün kiralamak istiyorsunuz? (Min. 5 gün)`);
         bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'kiralama_gun_bekle', kiraTip, gunluk: gf });
@@ -2218,9 +2261,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           const pri = gunlukFiyat(secilen, 'primary');
           const sec = gunlukFiyat(secilen, 'secondary');
           await mesajGonder(tel,
-            `🎮 *${secilen.ad}* (${secilen.platform})\n\nHangi tip kiralamak istiyorsunuz?\n\n` +
-            (priDolu ? '' : `*1* - 🔵 Primary (${fmt(pri)}/gün)\n`) +
-            (secDolu ? '' : `*2* - 🟣 Secondary (${fmt(sec)}/gün)`)
+            `🎮 *${secilen.ad}* (${secilen.platform})\n\n` + tipSecimMetni(secilen, priDolu, secDolu)
           );
           bekleyenOnaylar.set(tel, { tip: 'kiralama_tip_bekle', musteriId: musteri.id, musteriAd, oyunId: secilen.id, oyunAd: secilen.ad, priDolu, secDolu });
           return;
@@ -3269,10 +3310,7 @@ app.post('/api/kiralama-baslat', async (req, res) => {
     const temel = { musteriId: m.id, musteriAd, oyunId: o.id, oyunAd: o.ad, kaynak: 'site' };
     if (!tip) {
       const pri = gunlukFiyat(o, 'primary'), sec = gunlukFiyat(o, 'secondary');
-      let tipSecim = '';
-      if (!priDolu) tipSecim += `*1* - 🔵 Primary: ${fmt(pri)}/gün\n`;
-      if (!secDolu) tipSecim += `*2* - 🟣 Secondary: ${fmt(sec)}/gün\n`;
-      await mesajGonder(hedef, onEk + `🎮 *${o.ad}*${kampEtiket(o)}\n\nHangi tipi tercih edersiniz?\n${tipSecim}`);
+      await mesajGonder(hedef, onEk + `🎮 *${o.ad}*${kampEtiket(o)}\n\n` + tipSecimMetni(o, priDolu, secDolu));
       bekleyenSet(m, { ...temel, tip: 'kiralama_tip_bekle', priDolu, secDolu });
       return res.json({ ok: true, adim: 'tip' });
     }
