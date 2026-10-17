@@ -1561,13 +1561,15 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           const k = veri2.kiralamalar.find(x => x.id === hedefBekleyen.kiraId);
           if (k) {
             const tierOncesi = getMusteriTierBot(k.musteriId, veri2);
-            k.bit = tarihEkle(k.bit, hedefBekleyen.gun);
+            const uzHediye = hedefBekleyen.hediye || 0;
+            k.bit = tarihEkle(k.bit, hedefBekleyen.gun + uzHediye);
+            if (uzHediye) k.hediyeGun = (k.hediyeGun || 0) + uzHediye;
             k.ucret = (k.ucret||0) + hedefBekleyen.ucret;
             k.net = (k.net||0) + hedefBekleyen.ucret;
             // Uzatma sayısı ve geçmişi kaydet
             k.uzatmaSayisi = (k.uzatmaSayisi || 0) + 1;
             if (!k.uzatmalar) k.uzatmalar = [];
-            k.uzatmalar.push({ tarih: bugun(), gun: hedefBekleyen.gun, ucret: hedefBekleyen.ucret });
+            k.uzatmalar.push({ tarih: bugun(), gun: hedefBekleyen.gun, ucret: hedefBekleyen.ucret, ...(uzHediye ? { hediye: uzHediye } : {}) });
             // Oyun toplamGelir güncelle
             const oyunStatUzat = veri2.oyunlar.find(o => o.id === k.oyunId);
             if (oyunStatUzat) {
@@ -1577,14 +1579,14 @@ Açmak için: #ac [numara] veya #menu [numara]`);
             onayKaydiniSil();
             const tierSonrasi = getMusteriTierBot(k.musteriId, veri2);
             const tierAtladi = tierOncesi.seviye !== tierSonrasi.seviye;
-            let uzatmaMesaj = `✅ Uzatma onaylandı! ${hedefBekleyen.gun} gün eklendi.\nYeni bitiş: *${k.bit}* 🎮`;
+            let uzatmaMesaj = `✅ Uzatma onaylandı! ${hedefBekleyen.gun} gün eklendi${uzHediye ? ` + *${uzHediye} gün hediye* 🎁` : ''}.\nYeni bitiş: *${fmtTarih(k.bit)}* 🎮`;
             if (tierAtladi) {
               uzatmaMesaj += `\n\n🎉 *Tebrikler!* ${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} *${tierSonrasi.label}* seviyesine yükseldin!`;
               if (tierSonrasi.indirim > 0) uzatmaMesaj += `\n✨ Artık *%${tierSonrasi.indirim} indirim* hakkın var!`;
               await banaGonder(`🏅 *Tier Değişimi*\n👤 Müşteri #${k.musteriId}\n${tierOncesi.emoji} ${tierOncesi.label} → ${tierSonrasi.emoji} ${tierSonrasi.label}`);
             }
             await mesajGonder(hedefKey, uzatmaMesaj);
-            await banaGonder(`✅ Uzatma yapıldı: ${hedefTel}`);
+            await banaGonder(`✅ Uzatma yapıldı: ${hedefTel} — ${hedefBekleyen.gun} gün${uzHediye ? ` + ${uzHediye} gün hediye` : ''} (yeni bitiş ${fmtTarih(k.bit)})`);
           }
           return;
         }
@@ -2194,7 +2196,14 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         const indirimOraniUzat = tierUzat.indirim || 0;
         const indirimTLUzat = Math.round(hamUcretUzat * indirimOraniUzat / 100);
         const ucret = hamUcretUzat - indirimTLUzat;
-        let uzatmaMesaj = `🔄 *${gun} gün uzatma*\n`;
+        // Hediye gün — yeni kiralamadaki kuralla aynı
+        const uzKiraH = veri.kiralamalar.find(k => k.id === bekleyen.kiraId);
+        const uzOyunH = uzKiraH && veri.oyunlar.find(o => o.id === uzKiraH.oyunId);
+        const platinUzat = tierUzat.seviye === 'platin' || tierUzat.seviye === 'platinplus';
+        const hediyeUzat = (uzOyunH && (eskiOyunMu(uzOyunH, veri) || platinUzat) && gun >= 10) ? 5 : 0;
+        let uzatmaMesaj = `🔄 *${gun} gün uzatma*${hediyeUzat ? ` *+${hediyeUzat} gün hediye 🎁*` : ''}\n`;
+        if (uzKiraH) uzatmaMesaj += `📅 Yeni bitiş: *${fmtTarih(tarihEkle(uzKiraH.bit, gun + hediyeUzat))}*\n`;
+        if (!hediyeUzat && uzOyunH && (eskiOyunMu(uzOyunH, veri) || platinUzat) && gun < 10) uzatmaMesaj += `💡 10 gün ve üzeri uzatırsan *5 gün hediye* 🎁\n`;
         if (indirimOraniUzat > 0) {
           uzatmaMesaj += `💰 Normal: ${fmt(hamUcretUzat)}\n`;
           uzatmaMesaj += `${tierUzat.emoji} *${tierUzat.label} indirimi %${indirimOraniUzat}: -${fmt(indirimTLUzat)}*\n`;
@@ -2204,7 +2213,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
         }
         uzatmaMesaj += `*Ödeme:*\nIBAN: \`${CONFIG.IBAN}\`\nHesap Sahibi: ${CONFIG.HESAP_ISIM}\n\nDekontu buraya gönderin 📎`;
         await mesajGonder(tel, uzatmaMesaj);
-        bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'uzatma_dekont', gun, ucret });
+        bekleyenOnaylar.set(tel, { ...bekleyen, tip: 'uzatma_dekont', gun, ucret, hediye: hediyeUzat });
         return;
       }
 
@@ -2216,7 +2225,7 @@ Açmak için: #ac [numara] veya #menu [numara]`);
           const uzKira = veri.kiralamalar.find(k => k.id === bekleyen.kiraId);
           const oyun = veri.oyunlar.find(o => o.id === uzKira?.oyunId); // eskiden kira id'si ile oyun aranıyordu → yanlış oyun adı
           await banaGonder(
-            `💰 *UZATMA DEKONTU!*\n\n👤 *${musteriAd}*\n🎮 ${oyun?.ad||'?'}\n📅 ${bekleyen.gun} gün\n💵 ${fmt(bekleyen.ucret)}\n\n` +
+            `💰 *UZATMA DEKONTU!*\n\n👤 *${musteriAd}*\n🎮 ${oyun?.ad||'?'}\n📅 ${bekleyen.gun} gün${bekleyen.hediye ? ` + ${bekleyen.hediye} gün hediye 🎁` : ''}\n💵 ${fmt(bekleyen.ucret)}\n\n` +
             `Onaylamak için:\n*#onayla ${tel.replace('@c.us','').replace('@lid','')}*`
           );
           return;
